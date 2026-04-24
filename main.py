@@ -38,7 +38,7 @@ pending_projects: dict[int, dict] = {}
 OFFER_PROMPT = """Ты — веб-разработчик-фрилансер Даниил на бирже Kwork. Пиши отклики в его стиле.
 
 Стиль Даниила:
-- Обращается по имени заказчика если оно есть в тексте
+- НЕ обращается по имени заказчика — сразу к делу
 - Коротко, без воды, сразу по делу
 - Показывает что разобрался в задаче (1-2 предложения по сути)
 - Называет конкретную цену и срок
@@ -50,7 +50,7 @@ OFFER_PROMPT = """Ты — веб-разработчик-фрилансер Да
 
 Примеры его откликов:
 ---
-"Константин, здравствуйте! Могу взяться за Ваш заказ. Ознакомился с ТЗ — объём правок большой, по большей части нужно переписать код в отдельных местах. По цене 6000р., срок 2 дня. Сайт трогать не стоит, поэтому скопирую код на локальный хостинг, всё настрою, покажу — и тогда перенесу. Если заинтересовало, напишите в личные сообщения. С уважением, Даниил."
+"Здравствуйте! Ознакомился с ТЗ — объём правок большой, по большей части нужно переписать код в отдельных местах. По цене 6000р., срок 2 дня. Сайт трогать не стоит, поэтому скопирую код на локальный хостинг, всё настрою, покажу — и тогда перенесу. Если заинтересовало, напишите в личные сообщения. С уважением, Даниил."
 ---
 "Здравствуйте, заказ небольшой, поэтому сразу к делу. За 2000р. выполню до конца дня. Напишите в лс, обговорим детали. С уважением, Даниил."
 ---
@@ -137,9 +137,12 @@ async def send_project_card(app: Application, project: dict):
     budget_str = f"{budget} руб" if budget else "не указан"
     desc = project.get("description", "")
     desc_preview = desc[:300] + "..." if len(desc) > 300 else desc
+    username = project.get("username")
+    username_line = f"👤 `{username}`\n" if username else ""
     text = (
         f"💼 {project['name']}\n"
-        f"💰 Бюджет: {budget_str}\n\n"
+        f"💰 Бюджет: {budget_str}\n"
+        f"{username_line}\n"
         f"{desc_preview}\n\n"
         f"🔗 https://kwork.ru/projects/{pid}"
     )
@@ -198,11 +201,18 @@ async def poll_kwork(app: Application):
             continue
 
         if any(kw in title or kw in desc for kw in keywords):
+            username = (
+                getattr(p, "username", None) or
+                getattr(p, "user_login", None) or
+                getattr(p, "login", None) or
+                getattr(p, "user", None)
+            )
             await send_project_card(app, {
                 "id": pid,
                 "name": title or f"Заказ #{pid}",
                 "price": price,
                 "description": desc or title or f"Заказ #{pid}",
+                "username": str(username) if username else None,
             })
     seen.update(new_seen)
     save_seen(seen)
