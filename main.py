@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import traceback
 from datetime import datetime
 
@@ -22,16 +23,45 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 KWORK_PRICE = int(os.getenv("KWORK_PRICE", 1000))
 KWORK_DURATION = int(os.getenv("KWORK_DURATION", 3))
 KWORK_OFFER_TYPE = os.getenv("KWORK_OFFER_TYPE", "custom")
+MIN_BUDGET = int(os.getenv("MIN_BUDGET", 0))
 
 KEYWORDS_FILE = "keywords.json"
+BLACKLIST_FILE = "blacklist.json"
 SEEN_IDS_FILE = "seen_ids.json"
 MSK = pytz.timezone("Europe/Moscow")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# In-memory state: project_id -> project data
 pending_projects: dict[int, dict] = {}
+
+OFFER_PROMPT = """Ты — веб-разработчик-фрилансер Даниил на бирже Kwork. Пиши отклики в его стиле.
+
+Стиль Даниила:
+- Обращается по имени заказчика если оно есть в тексте
+- Коротко, без воды, сразу по делу
+- Показывает что разобрался в задаче (1-2 предложения по сути)
+- Называет конкретную цену и срок
+- Предлагает обсудить детали в личных сообщениях
+- Заканчивает: "С уважением, Даниил."
+- НЕ пишет "я эксперт", "гарантирую качество", "опыт 10 лет" — это звучит как спам
+
+Специализация: WordPress, HTML/CSS/JS, верстка по макету, Telegram-боты, парсеры, скрипты на Python, доработка сайтов.
+
+Примеры его откликов:
+---
+"Константин, здравствуйте! Могу взяться за Ваш заказ. Ознакомился с ТЗ — объём правок большой, по большей части нужно переписать код в отдельных местах. По цене 6000р., срок 2 дня. Сайт трогать не стоит, поэтому скопирую код на локальный хостинг, всё настрою, покажу — и тогда перенесу. Если заинтересовало, напишите в личные сообщения. С уважением, Даниил."
+---
+"Здравствуйте, заказ небольшой, поэтому сразу к делу. За 2000р. выполню до конца дня. Напишите в лс, обговорим детали. С уважением, Даниил."
+---
+"Здравствуйте! Вот похожие работы: https://kwork.ru/portfolio/19085359 — WordPress + ACF. Для вашего проекта сделаю пиксель-перфект перенос с макета на WordPress, установлю на хостинг. По цене и срокам: 20.000р., 7 дней. Если предложение заинтересовало, буду рад пообщаться в личных сообщениях. С уважением, Даниил."
+---
+
+Заказ:
+{description}
+
+Ответь строго в формате JSON:
+{{"name": "название до 6 слов", "text": "текст отклика"}}"""
 
 
 def load_keywords() -> list[str]:
@@ -42,6 +72,24 @@ def load_keywords() -> list[str]:
 def save_keywords(kws: list[str]):
     with open(KEYWORDS_FILE, "w", encoding="utf-8") as f:
         json.dump(kws, f, ensure_ascii=False, indent=2)
+
+
+def load_blacklist() -> list[str]:
+    if not os.path.exists(BLACKLIST_FILE):
+        return []
+    with open(BLACKLIST_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_blacklist(bl: list[str]):
+    with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
+        json.dump(bl, f, ensure_ascii=False, indent=2)
+
+
+def is_blacklisted(title: str, desc: str) -> bool:
+    bl = [w.lower() for w in load_blacklist()]
+    text = (title + " " + desc).lower()
+    return any(w in text for w in bl)
 
 
 def load_seen() -> set[int]:
@@ -62,12 +110,7 @@ def is_work_hours() -> bool:
 
 
 async def generate_offer(description: str) -> dict:
-    prompt = (
-        "Ты — фрилансер на Kwork. Напиши отклик на заказ.\n"
-        "Заказ:\n" + description + "\n\n"
-        "Ответь строго в формате JSON с двумя полями:\n"
-        '{"name": "название предложения до 7 слов", "text": "текст отклика — профессиональный, краткий, показывает понимание задачи, предлагает обсудить детали"}'
-    )
+    prompt = OFFER_PROMPT.format(description=description)
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -82,7 +125,6 @@ async def generate_offer(description: str) -> dict:
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
-        # Extract JSON from response
         start = content.find("{")
         end = content.rfind("}") + 1
         return json.loads(content[start:end])
@@ -91,18 +133,35 @@ async def generate_offer(description: str) -> dict:
 async def send_project_card(app: Application, project: dict):
     pid = project["id"]
     pending_projects[pid] = project
+    budget = project.get("price")
+    budget_str = f"{budget} руб" if budget else "не указан"
     text = (
         f"📌 {project['name']}\n"
-        f"💰 Бюджет: {project.get('price', '—')} руб\n"
+        f"💰 Бюджет: {budget_str}\n"
         f"🔗 https://kwork.ru/projects/{pid}"
     )
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✍️ Написать отклик", callback_data=f"reply:{pid}"),
             InlineKeyboardButton("❌ Пропустить", callback_data=f"skip:{pid}"),
+        ],
+        [
+            InlineKeyboardButton("🚫 Блокировать похожие", callback_data=f"block:{pid}"),
         ]
     ])
     await app.bot.send_message(chat_id=TG_CHAT_ID, text=text, reply_markup=keyboard)
+
+
+def extract_block_words(title: str, desc: str) -> list[str]:
+    """Extract meaningful words from title to suggest for blacklist."""
+    text = (title + " " + desc).lower()
+    # Remove common stop-words
+    stop = {"и", "в", "на", "с", "по", "для", "из", "от", "к", "о", "а", "но", "или",
+            "не", "за", "что", "как", "это", "его", "её", "их", "мне", "мы", "вы", "он",
+            "она", "они", "есть", "быть", "до", "при", "об", "под", "над", "без"}
+    words = re.findall(r'\b[а-яёa-z]{4,}\b', text)
+    unique = list(dict.fromkeys(w for w in words if w not in stop))
+    return unique[:5]
 
 
 async def poll_kwork(app: Application):
@@ -126,6 +185,15 @@ async def poll_kwork(app: Application):
         title = (getattr(p, "title", None) or getattr(p, "name", None) or "").lower()
         desc = (getattr(p, "description", None) or "").lower()
         price = getattr(p, "price", None) or getattr(p, "budget", None)
+
+        # Skip if blacklisted
+        if is_blacklisted(title, desc):
+            continue
+
+        # Skip if below min budget
+        if MIN_BUDGET > 0 and price and int(price) < MIN_BUDGET:
+            continue
+
         if any(kw in title or kw in desc for kw in keywords):
             await send_project_card(app, {
                 "id": pid,
@@ -151,7 +219,29 @@ async def polling_loop(app: Application):
         await asyncio.sleep(60)
 
 
-# --- Handlers ---
+def offer_keyboard(pid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Отправить на Kwork", callback_data=f"send:{pid}"),
+            InlineKeyboardButton("🔄 Переписать", callback_data=f"regen:{pid}"),
+            InlineKeyboardButton("❌ Отмена", callback_data=f"cancel:{pid}"),
+        ]
+    ])
+
+
+async def do_generate_and_reply(query, project: dict):
+    pid = project["id"]
+    try:
+        offer = await generate_offer(project["description"])
+        project["offer_name"] = offer["name"]
+        project["offer_text"] = offer["text"]
+        pending_projects[pid] = project
+    except Exception as e:
+        await query.message.reply_text(f"❗ Ошибка генерации: {e}")
+        return
+    text = f"📝 *{offer['name']}*\n\n{offer['text']}"
+    await query.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
+
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -163,6 +253,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_projects.pop(pid, None)
         await query.edit_message_reply_markup(reply_markup=None)
 
+    elif data.startswith("block:"):
+        pid = int(data.split(":")[1])
+        project = pending_projects.pop(pid, None)
+        await query.edit_message_reply_markup(reply_markup=None)
+        if project:
+            words = extract_block_words(project["name"], project["description"])
+            bl = load_blacklist()
+            added = []
+            for w in words:
+                if w not in bl:
+                    bl.append(w)
+                    added.append(w)
+            save_blacklist(bl)
+            if added:
+                await query.message.reply_text(
+                    f"🚫 Заблокированы слова: {', '.join(added)}\n"
+                    f"Похожие заказы больше не придут.\n"
+                    f"Управление: /blacklist | /unblock слово"
+                )
+            else:
+                await query.message.reply_text("🚫 Похожие слова уже в чёрном списке.")
+
     elif data.startswith("reply:"):
         pid = int(data.split(":")[1])
         project = pending_projects.get(pid)
@@ -171,23 +283,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text("⏳ Генерирую отклик...")
-        try:
-            offer = await generate_offer(project["description"])
-            project["offer_name"] = offer["name"]
-            project["offer_text"] = offer["text"]
-            pending_projects[pid] = project
-        except Exception as e:
-            await query.message.reply_text(f"❗ Ошибка генерации: {e}")
-            return
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Отправить на Kwork", callback_data=f"send:{pid}"),
-                InlineKeyboardButton("🔄 Переписать", callback_data=f"regen:{pid}"),
-                InlineKeyboardButton("❌ Отмена", callback_data=f"cancel:{pid}"),
-            ]
-        ])
-        text = f"📝 *Предложение:* {offer['name']}\n\n{offer['text']}"
-        await query.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        await do_generate_and_reply(query, project)
 
     elif data.startswith("regen:"):
         pid = int(data.split(":")[1])
@@ -197,23 +293,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text("⏳ Генерирую новый вариант...")
-        try:
-            offer = await generate_offer(project["description"])
-            project["offer_name"] = offer["name"]
-            project["offer_text"] = offer["text"]
-            pending_projects[pid] = project
-        except Exception as e:
-            await query.message.reply_text(f"❗ Ошибка генерации: {e}")
-            return
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Отправить на Kwork", callback_data=f"send:{pid}"),
-                InlineKeyboardButton("🔄 Переписать", callback_data=f"regen:{pid}"),
-                InlineKeyboardButton("❌ Отмена", callback_data=f"cancel:{pid}"),
-            ]
-        ])
-        text = f"📝 *Предложение:* {offer['name']}\n\n{offer['text']}"
-        await query.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        await do_generate_and_reply(query, project)
 
     elif data.startswith("send:"):
         pid = int(data.split(":")[1])
@@ -245,9 +325,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=None)
 
 
+# --- Commands ---
+
 async def cmd_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kws = load_keywords()
-    await update.message.reply_text("Ключевые слова:\n" + ", ".join(kws))
+    await update.message.reply_text("🔑 Ключевые слова:\n" + ", ".join(kws))
 
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -255,14 +337,10 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Использование: /add слово1 слово2 ...")
         return
     kws = load_keywords()
-    added = []
-    for w in context.args:
-        w = w.lower()
-        if w not in kws:
-            kws.append(w)
-            added.append(w)
+    added = [w.lower() for w in context.args if w.lower() not in kws]
+    kws.extend(added)
     save_keywords(kws)
-    await update.message.reply_text(f"Добавлено: {', '.join(added)}" if added else "Уже есть.")
+    await update.message.reply_text(f"✅ Добавлено: {', '.join(added)}" if added else "Уже есть.")
 
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -270,14 +348,48 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Использование: /remove слово")
         return
     kws = load_keywords()
-    removed = []
-    for w in context.args:
-        w = w.lower()
-        if w in kws:
-            kws.remove(w)
-            removed.append(w)
+    removed = [w.lower() for w in context.args if w.lower() in kws]
+    for w in removed:
+        kws.remove(w)
     save_keywords(kws)
-    await update.message.reply_text(f"Удалено: {', '.join(removed)}" if removed else "Не найдено.")
+    await update.message.reply_text(f"✅ Удалено: {', '.join(removed)}" if removed else "Не найдено.")
+
+
+async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bl = load_blacklist()
+    if bl:
+        await update.message.reply_text("🚫 Чёрный список:\n" + ", ".join(bl))
+    else:
+        await update.message.reply_text("Чёрный список пуст.")
+
+
+async def cmd_unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /unblock слово")
+        return
+    bl = load_blacklist()
+    removed = [w.lower() for w in context.args if w.lower() in bl]
+    for w in removed:
+        bl.remove(w)
+    save_blacklist(bl)
+    await update.message.reply_text(f"✅ Разблокировано: {', '.join(removed)}" if removed else "Не найдено в чёрном списке.")
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(MSK)
+    active = is_work_hours()
+    kws = load_keywords()
+    bl = load_blacklist()
+    seen = load_seen()
+    status = "✅ активен" if active else "😴 пауза (вне рабочих часов)"
+    await update.message.reply_text(
+        f"🤖 Статус: {status}\n"
+        f"🕐 Время МСК: {now.strftime('%H:%M')}\n"
+        f"🔑 Ключевых слов: {len(kws)}\n"
+        f"🚫 В чёрном списке: {len(bl)}\n"
+        f"👁 Просмотрено заказов: {len(seen)}\n"
+        f"💰 Мин. бюджет: {MIN_BUDGET} руб\n"
+    )
 
 
 async def post_init(app: Application):
@@ -289,6 +401,9 @@ def main():
     app.add_handler(CommandHandler("keywords", cmd_keywords))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("remove", cmd_remove))
+    app.add_handler(CommandHandler("blacklist", cmd_blacklist))
+    app.add_handler(CommandHandler("unblock", cmd_unblock))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(on_callback))
     log.info("Bot started")
     app.run_polling()
