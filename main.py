@@ -138,8 +138,8 @@ async def send_project_card(app: Application, project: dict):
     desc = project.get("description", "")
     desc_preview = desc[:300] + "..." if len(desc) > 300 else desc
     text = (
-        f"📌 {project['name']}\n"
-        f"💼 Бюджет: {budget_str}\n\n"
+        f"💼 {project['name']}\n"
+        f"💰 Бюджет: {budget_str}\n\n"
         f"{desc_preview}\n\n"
         f"🔗 https://kwork.ru/projects/{pid}"
     )
