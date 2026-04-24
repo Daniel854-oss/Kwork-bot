@@ -8,6 +8,7 @@ from datetime import datetime
 
 import httpx
 import pytz
+from google import genai as google_genai
 from dotenv import load_dotenv
 from kwork import Kwork
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -20,6 +21,7 @@ KWORK_PASSWORD = os.getenv("KWORK_PASSWORD")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = int(os.getenv("TG_CHAT_ID"))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 KWORK_PRICE = int(os.getenv("KWORK_PRICE", 1000))
 KWORK_DURATION = int(os.getenv("KWORK_DURATION", 3))
 KWORK_OFFER_TYPE = os.getenv("KWORK_OFFER_TYPE", "custom")
@@ -125,33 +127,16 @@ def is_work_hours() -> bool:
 
 async def generate_offer(description: str) -> dict:
     prompt = OFFER_PROMPT.format(description=description)
-    attempts = len(OPENROUTER_KEYS) * 2
-    for attempt in range(attempts):
-        key = get_current_api_key()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "google/gemma-4-31b-it:free",
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-            if resp.status_code == 429:
-                next_key = get_next_api_key()
-                log.warning(f"429 на ключе #{_current_key_index}, переключаюсь на следующий")
-                if next_key == key:
-                    await asyncio.sleep(15)
-                continue
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            return json.loads(content[start:end])
-    raise Exception("Все API ключи исчерпали лимит. Попробуй завтра.")
+    client = google_genai.Client(api_key=GEMINI_API_KEY)
+    response = await asyncio.to_thread(
+        client.models.generate_content,
+        model="gemini-2.0-flash",
+        contents=prompt,
+    )
+    content = response.text
+    start = content.find("{")
+    end = content.rfind("}") + 1
+    return json.loads(content[start:end])
 
 
 async def send_project_card(app: Application, project: dict):
