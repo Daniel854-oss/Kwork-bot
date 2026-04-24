@@ -111,23 +111,30 @@ def is_work_hours() -> bool:
 
 async def generate_offer(description: str) -> dict:
     prompt = OFFER_PROMPT.format(description=description)
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "google/gemma-4-31b-it:free",
-                "messages": [{"role": "user", "content": prompt}],
-            },
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        return json.loads(content[start:end])
+    for attempt in range(3):
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "google/gemma-4-31b-it:free",
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if resp.status_code == 429:
+                wait = 15 * (attempt + 1)
+                log.warning(f"429 от OpenRouter, жду {wait}с (попытка {attempt+1}/3)")
+                await asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            return json.loads(content[start:end])
+    raise Exception("OpenRouter вернул 429 три раза подряд. Попробуй позже.")
 
 
 async def send_project_card(app: Application, project: dict):
