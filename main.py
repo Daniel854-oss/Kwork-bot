@@ -117,18 +117,21 @@ async def poll_kwork(app: Application):
     keywords = [k.lower() for k in load_keywords()]
     new_seen = set()
     for p in projects:
-        pid = p.id
+        pid = getattr(p, "id", None)
+        if pid is None:
+            continue
         new_seen.add(pid)
         if pid in seen:
             continue
-        title = (p.name or "").lower()
-        desc = (p.description or "").lower()
+        title = (getattr(p, "title", None) or getattr(p, "name", None) or "").lower()
+        desc = (getattr(p, "description", None) or "").lower()
+        price = getattr(p, "price", None) or getattr(p, "budget", None)
         if any(kw in title or kw in desc for kw in keywords):
             await send_project_card(app, {
                 "id": pid,
-                "name": p.name,
-                "price": getattr(p, "price", None),
-                "description": p.description or p.name,
+                "name": title or f"Заказ #{pid}",
+                "price": price,
+                "description": desc or title or f"Заказ #{pid}",
             })
     seen.update(new_seen)
     save_seen(seen)
