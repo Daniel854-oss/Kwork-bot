@@ -76,7 +76,7 @@ async def generate_offer(description: str) -> dict:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "google/gemini-2.0-flash-001",
+                "model": "google/gemma-4-31b-it:free",
                 "messages": [{"role": "user", "content": prompt}],
             },
         )
