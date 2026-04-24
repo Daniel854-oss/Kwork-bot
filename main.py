@@ -155,7 +155,7 @@ async def send_project_card(app: Application, project: dict):
             InlineKeyboardButton("🚫 Блокировать похожие", callback_data=f"block:{pid}"),
         ]
     ])
-    await app.bot.send_message(chat_id=TG_CHAT_ID, text=text, reply_markup=keyboard)
+    await app.bot.send_message(chat_id=TG_CHAT_ID, text=text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 def extract_block_words(title: str, desc: str) -> list[str]:
