@@ -130,7 +130,7 @@ async def generate_offer(description: str) -> dict:
     client = google_genai.Client(api_key=GEMINI_API_KEY)
     response = await asyncio.to_thread(
         client.models.generate_content,
-        model="gemini-2.5-flash",
+        model="gemini-3.1-flash-lite-preview-06-17",
         contents=prompt,
     )
     content = response.text
