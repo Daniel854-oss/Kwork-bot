@@ -25,6 +25,20 @@ KWORK_DURATION = int(os.getenv("KWORK_DURATION", 3))
 KWORK_OFFER_TYPE = os.getenv("KWORK_OFFER_TYPE", "custom")
 MIN_BUDGET = int(os.getenv("MIN_BUDGET", 0))
 
+# Несколько API ключей через запятую: OPENROUTER_API_KEY=key1,key2,key3
+OPENROUTER_KEYS = [k.strip() for k in (OPENROUTER_API_KEY or "").split(",") if k.strip()]
+_current_key_index = 0
+
+
+def get_next_api_key() -> str:
+    global _current_key_index
+    _current_key_index = (_current_key_index + 1) % len(OPENROUTER_KEYS)
+    return OPENROUTER_KEYS[_current_key_index]
+
+
+def get_current_api_key() -> str:
+    return OPENROUTER_KEYS[_current_key_index] if OPENROUTER_KEYS else ""
+
 KEYWORDS_FILE = "keywords.json"
 BLACKLIST_FILE = "blacklist.json"
 SEEN_IDS_FILE = "seen_ids.json"
@@ -111,12 +125,14 @@ def is_work_hours() -> bool:
 
 async def generate_offer(description: str) -> dict:
     prompt = OFFER_PROMPT.format(description=description)
-    for attempt in range(3):
+    attempts = len(OPENROUTER_KEYS) * 2
+    for attempt in range(attempts):
+        key = get_current_api_key()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
                 },
                 json={
@@ -125,16 +141,17 @@ async def generate_offer(description: str) -> dict:
                 },
             )
             if resp.status_code == 429:
-                wait = 15 * (attempt + 1)
-                log.warning(f"429 от OpenRouter, жду {wait}с (попытка {attempt+1}/3)")
-                await asyncio.sleep(wait)
+                next_key = get_next_api_key()
+                log.warning(f"429 на ключе #{_current_key_index}, переключаюсь на следующий")
+                if next_key == key:
+                    await asyncio.sleep(15)
                 continue
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
             start = content.find("{")
             end = content.rfind("}") + 1
             return json.loads(content[start:end])
-    raise Exception("OpenRouter вернул 429 три раза подряд. Попробуй позже.")
+    raise Exception("Все API ключи исчерпали лимит. Попробуй завтра.")
 
 
 async def send_project_card(app: Application, project: dict):
