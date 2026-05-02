@@ -21,6 +21,12 @@ from storage import load_seen_msgs, save_seen_msgs
 log = logging.getLogger(__name__)
 MSK = pytz.timezone("Europe/Moscow")
 
+def _esc(text: str) -> str:
+    """Escape Markdown special characters."""
+    for ch in ('_', '*', '`', '[', ']', '(', ')'):
+        text = text.replace(ch, '\\' + ch)
+    return text
+
 # In-memory storage for pending message replies
 pending_replies: dict[str, dict] = {}
 
@@ -331,15 +337,15 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with acc.create_api() as api:
                 dialogs = await api.get_all_dialogs()
             unread = [d for d in dialogs if (getattr(d, 'unread', 0) or 0) > 0]
-            lines = [f"📨 *{acc.name}* — {len(dialogs)} диалогов, {len(unread)} непрочитанных\n"]
+            lines = [f"📨 {acc.name} — {len(dialogs)} диалогов, {len(unread)} непрочитанных\n"]
             for d in dialogs[:10]:
                 username = getattr(d, 'username', '?')
-                last = (getattr(d, 'last_message', '') or '')[:60]
+                last = _esc((getattr(d, 'last_message', '') or '')[:60])
                 is_unread = '🔴' if (getattr(d, 'unread', 0) or 0) > 0 else '⚪'
-                lines.append(f"{is_unread} *{username}*: {last}")
+                lines.append(f"{is_unread} {username}: {last}")
             if len(dialogs) > 10:
                 lines.append(f"\n... и ещё {len(dialogs) - 10}")
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            await update.message.reply_text("\n".join(lines))
         except Exception as e:
             await update.message.reply_text(f"❗ Ошибка: {e}")
 
@@ -358,12 +364,12 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 messages = await api.get_dialog_with_user(username)
             agent_ctx.current_dialog_user = username
             recent = messages[-10:] if len(messages) > 10 else messages
-            lines = [f"💬 *Переписка с {username}* ({acc.name})\n"]
+            lines = [f"💬 Переписка с {username} ({acc.name})\n"]
             for m in recent:
                 sender = getattr(m, 'from_username', '?')
-                text = (getattr(m, 'message', '') or '')[:200]
-                lines.append(f"👤 *{sender}*: {text}")
-            await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+                text = _esc((getattr(m, 'message', '') or '')[:200])
+                lines.append(f"👤 {sender}: {text}")
+            await update.message.reply_text("\n\n".join(lines))
         except Exception as e:
             await update.message.reply_text(f"❗ Ошибка: {e}")
 

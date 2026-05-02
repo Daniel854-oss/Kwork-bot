@@ -39,6 +39,9 @@ stats = {"polls": 0, "offers_sent": 0, "errors": 0, "started_at": None}
 # Agent context (per-chat)
 agent_ctx = AgentContext()
 
+# Global app reference for agent actions
+_app: Application | None = None
+
 
 def is_work_hours() -> bool:
     now = datetime.now(MSK)
@@ -586,7 +589,7 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "force_poll":
         await update.message.reply_text("🔄 Проверяю заказы...")
         try:
-            await poll_kwork(update.get_bot()._application)
+            await poll_kwork(_app)
             await update.message.reply_text("✅ Проверка завершена!")
         except Exception as e:
             await update.message.reply_text(f"❗ Ошибка: {e}")
@@ -641,6 +644,8 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Build & run ──────────────────────────────────────────
 
 async def post_init(app: Application):
+    global _app
+    _app = app
     stats["started_at"] = datetime.now(MSK)
     asyncio.create_task(polling_loop(app))
 
