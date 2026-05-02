@@ -15,7 +15,8 @@ from telegram.ext import (
 )
 
 from accounts import AccountManager
-from ai import generate_offer, answer_question
+from agent import AgentContext, run_orders_agent, edit_offer
+from ai import generate_offer
 from config import TG_BOT_TOKEN_ORDERS, TG_CHAT_ID, MIN_BUDGET, KWORK_OFFER_TYPE
 from storage import (
     load_keywords, save_keywords,
@@ -34,6 +35,9 @@ account_mgr: AccountManager | None = None
 
 # Stats
 stats = {"polls": 0, "offers_sent": 0, "errors": 0, "started_at": None}
+
+# Agent context (per-chat)
+agent_ctx = AgentContext()
 
 
 def is_work_hours() -> bool:
@@ -246,6 +250,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         project["selected_account"] = acc_id
         pending_projects[pid] = project
+        # Set agent context
+        agent_ctx.set_project(project, acc_id)
         await query.edit_message_reply_markup(reply_markup=None)
         acc = account_mgr.get(acc_id)
         acc_name = acc.name if acc else acc_id
@@ -311,16 +317,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 *Kwork Orders Bot*\n\n"
-        "Я мониторю новые заказы на Kwork, подбираю лучший аккаунт "
-        "и генерирую отклики через AI.\n\n"
+        "👋 *Kwork Orders Bot — AI Agent*\n\n"
+        "Я мониторю заказы на Kwork и помогаю с откликами.\n\n"
         "📋 *Что я умею:*\n"
-        "• Проверяю заказы каждые 60 сек\n"
+        "• Автомониторинг заказов каждые 60 сек\n"
         "• Автоподбор аккаунта (🔵 Сайты / 🟢 Боты)\n"
-        "• AI-генерация откликов с адекватными ценами\n"
-        "• Превью перед отправкой\n"
-        "• Чёрный список и фильтры\n\n"
-        "Напиши /help для списка команд или задай вопрос текстом.",
+        "• AI-генерация откликов с ценами\n"
+        "• Редактирование откликов текстом\n"
+        "• Объяснение заказов\n\n"
+        "💬 *Просто пиши мне:*\n"
+        "• \"исправь цену на 5000\" — отредактирую отклик\n"
+        "• \"объясни этот заказ\" — разберу ТЗ\n"
+        "• \"проверь заказы\" — принудительный поиск\n"
+        "• Или напиши свой текст отклика\n\n"
+        "/help — все команды",
         parse_mode="Markdown",
     )
 
@@ -328,20 +338,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *Команды:*\n\n"
-        "🔍 *Мониторинг:*\n"
-        "/status — статус бота и статистика\n"
-        "/test — самодиагностика (проверка API и аккаунтов)\n\n"
-        "🔑 *Ключевые слова:*\n"
-        "/keywords — текущий список\n"
-        "/add слово1 слово2 — добавить\n"
-        "/remove слово — удалить\n\n"
-        "🚫 *Чёрный список:*\n"
-        "/blacklist — список заблокированных слов\n"
-        "/unblock слово — разблокировать\n\n"
-        "👥 *Аккаунты:*\n"
+        "/status — статус и статистика\n"
+        "/test — самодиагностика\n"
+        "/keywords — ключевые слова\n"
+        "/add /remove — управление словами\n"
+        "/blacklist /unblock — чёрный список\n"
         "/accounts — информация об аккаунтах\n\n"
-        "💬 *AI:*\n"
-        "Просто напиши вопрос текстом — AI ответит о функциях бота.",
+        "💬 *AI-агент (просто пиши текстом):*\n"
+        "• \"исправь цену на 3000\" — правит отклик\n"
+        "• \"сделай короче\" — сокращает\n"
+        "• \"объясни заказ\" — разбирает ТЗ\n"
+        "• \"проверь заказы сейчас\" — поллинг\n"
+        "• \"сколько коннектов?\" — баланс\n"
+        "• \"какие заказы в работе?\" — активные\n"
+        "• Свой текст → станет откликом",
         parse_mode="Markdown",
     )
 
@@ -475,18 +485,157 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── Free text → AI answer ────────────────────────────────
+# ── Free text → AI Agent ──────────────────────────────────
 
 async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    question = update.message.text
-    if not question or question.startswith("/"):
+    message = update.message.text
+    if not message or message.startswith("/"):
         return
+
     await update.message.reply_text("🤔 Думаю...")
     try:
-        answer = await answer_question(question)
-        await update.message.reply_text(answer)
+        result = await run_orders_agent(message, agent_ctx)
     except Exception as e:
         await update.message.reply_text(f"❗ Ошибка AI: {e}")
+        return
+
+    action = result.get("action", "none")
+    params = result.get("params", {})
+    response = result.get("response", "")
+
+    if action == "edit_offer" and agent_ctx.current_offer:
+        instruction = params.get("instruction", message)
+        try:
+            new_offer = await edit_offer(agent_ctx.current_offer, instruction)
+            # Apply param overrides
+            if params.get("price"):
+                new_offer["price"] = params["price"]
+            if params.get("days"):
+                new_offer["days"] = params["days"]
+            agent_ctx.set_offer(new_offer)
+            # Update pending project
+            if agent_ctx.current_project:
+                pid = agent_ctx.current_project["id"]
+                project = pending_projects.get(pid)
+                if project:
+                    project["offer_name"] = new_offer["name"]
+                    project["offer_text"] = new_offer["text"]
+                    project["offer_price"] = new_offer.get("price", 1000)
+                    project["offer_days"] = new_offer.get("days", 3)
+                    pending_projects[pid] = project
+            text = (
+                f"📝 *{new_offer['name']}*\n"
+                f"💰 {new_offer.get('price','?')}₽ | ⏱ {new_offer.get('days','?')} дн.\n\n"
+                f"{new_offer['text']}"
+            )
+            pid = agent_ctx.current_project["id"] if agent_ctx.current_project else 0
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
+        except Exception as e:
+            await update.message.reply_text(f"❗ Ошибка редактирования: {e}")
+
+    elif action == "set_custom_offer" and agent_ctx.current_project:
+        custom_text = params.get("text", message)
+        pid = agent_ctx.current_project["id"]
+        offer = {
+            "name": agent_ctx.current_project.get("name", "Отклик")[:50],
+            "text": custom_text,
+            "price": params.get("price", 1000),
+            "days": params.get("days", 3),
+        }
+        agent_ctx.set_offer(offer)
+        project = pending_projects.get(pid)
+        if project:
+            project["offer_name"] = offer["name"]
+            project["offer_text"] = offer["text"]
+            project["offer_price"] = offer["price"]
+            project["offer_days"] = offer["days"]
+            pending_projects[pid] = project
+        text = (
+            f"📝 *Ваш отклик:*\n"
+            f"💰 {offer['price']}₽ | ⏱ {offer['days']} дн.\n\n"
+            f"{offer['text']}"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
+
+    elif action == "generate_offer" and agent_ctx.current_project:
+        acc_id = params.get("account_id") or agent_ctx.selected_account or "sites"
+        pid = agent_ctx.current_project["id"]
+        project = pending_projects.get(pid, agent_ctx.current_project)
+        project["selected_account"] = acc_id
+        await update.message.reply_text("⏳ Генерирую отклик...")
+        try:
+            offer = await generate_offer(project["description"], acc_id)
+            agent_ctx.set_offer(offer)
+            project["offer_name"] = offer["name"]
+            project["offer_text"] = offer["text"]
+            project["offer_price"] = offer.get("price", 1000)
+            project["offer_days"] = offer.get("days", 3)
+            pending_projects[pid] = project
+            acc = account_mgr.get(acc_id)
+            acc_name = acc.name if acc else acc_id
+            text = (
+                f"📝 *{offer['name']}*\n"
+                f"🏷 {acc_name}\n"
+                f"💰 {offer.get('price','?')}₽ | ⏱ {offer.get('days','?')} дн.\n\n"
+                f"{offer['text']}"
+            )
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
+        except Exception as e:
+            await update.message.reply_text(f"❗ Ошибка генерации: {e}")
+
+    elif action == "force_poll":
+        await update.message.reply_text("🔄 Проверяю заказы...")
+        try:
+            await poll_kwork(update.get_bot()._application)
+            await update.message.reply_text("✅ Проверка завершена!")
+        except Exception as e:
+            await update.message.reply_text(f"❗ Ошибка: {e}")
+
+    elif action == "get_connects":
+        lines = []
+        for acc in account_mgr.accounts:
+            try:
+                async with acc.create_api() as api:
+                    connects = await api.get_connects()
+                    total = getattr(connects, "total", "?")
+                    lines.append(f"{acc.name}: {total} коннектов")
+            except Exception as e:
+                lines.append(f"{acc.name}: ❌ {str(e)[:40]}")
+        await update.message.reply_text("💰 *Коннекты:*\n\n" + "\n".join(lines), parse_mode="Markdown")
+
+    elif action == "get_worker_orders":
+        lines = []
+        for acc in account_mgr.accounts:
+            try:
+                async with acc.create_api() as api:
+                    orders = await api.get_worker_orders()
+                    data = orders.get("data", []) if isinstance(orders, dict) else []
+                    lines.append(f"{acc.name}: {len(data)} заказов в работе")
+                    for o in data[:3]:
+                        title = o.get("title", o.get("name", "?"))[:50] if isinstance(o, dict) else str(o)[:50]
+                        lines.append(f"  • {title}")
+            except Exception as e:
+                lines.append(f"{acc.name}: ❌ {str(e)[:40]}")
+        await update.message.reply_text("📋 *Заказы в работе:*\n\n" + "\n".join(lines), parse_mode="Markdown")
+
+    elif action == "explain_order" and agent_ctx.current_project:
+        await update.message.reply_text(response)
+
+    elif action == "show_pending":
+        if pending_projects:
+            lines = []
+            for pid, p in list(pending_projects.items())[:10]:
+                lines.append(f"• #{pid} — {p.get('name','?')[:50]}")
+            await update.message.reply_text("📋 *В очереди:*\n\n" + "\n".join(lines), parse_mode="Markdown")
+        else:
+            await update.message.reply_text("Очередь пуста.")
+
+    else:
+        # Default: just show AI response
+        if response:
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text("Не понял запрос. Попробуй переформулировать.")
 
 
 # ── Build & run ──────────────────────────────────────────

@@ -13,7 +13,8 @@ from telegram.ext import (
 )
 
 from accounts import AccountManager
-from ai import generate_reply, answer_question
+from agent import AgentContext, run_messages_agent, edit_reply
+from ai import generate_reply
 from config import TG_BOT_TOKEN_MESSAGES, TG_CHAT_ID
 from storage import load_seen_msgs, save_seen_msgs
 
@@ -28,6 +29,9 @@ account_mgr: AccountManager | None = None
 
 # Stats
 stats = {"polls": 0, "messages_found": 0, "replies_sent": 0, "errors": 0, "started_at": None}
+
+# Agent context
+agent_ctx = AgentContext()
 
 
 # ── Polling messages ──────────────────────────────────────
@@ -299,18 +303,168 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── Free text → AI answer ────────────────────────────────
+# ── Free text → AI Agent ──────────────────────────────────
 
 async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    question = update.message.text
-    if not question or question.startswith("/"):
+    message = update.message.text
+    if not message or message.startswith("/"):
         return
+
     await update.message.reply_text("🤔 Думаю...")
     try:
-        answer = await answer_question(question)
-        await update.message.reply_text(answer)
+        result = await run_messages_agent(message, agent_ctx)
     except Exception as e:
         await update.message.reply_text(f"❗ Ошибка AI: {e}")
+        return
+
+    action = result.get("action", "none")
+    params = result.get("params", {})
+    response = result.get("response", "")
+
+    if action == "get_dialogs":
+        acc_id = params.get("account_id", "sites")
+        acc = account_mgr.get(acc_id)
+        if not acc:
+            await update.message.reply_text(f"❗ Аккаунт '{acc_id}' не найден.")
+            return
+        try:
+            async with acc.create_api() as api:
+                dialogs = await api.get_all_dialogs()
+            unread = [d for d in dialogs if (getattr(d, 'unread', 0) or 0) > 0]
+            lines = [f"📨 *{acc.name}* — {len(dialogs)} диалогов, {len(unread)} непрочитанных\n"]
+            for d in dialogs[:10]:
+                username = getattr(d, 'username', '?')
+                last = (getattr(d, 'last_message', '') or '')[:60]
+                is_unread = '🔴' if (getattr(d, 'unread', 0) or 0) > 0 else '⚪'
+                lines.append(f"{is_unread} *{username}*: {last}")
+            if len(dialogs) > 10:
+                lines.append(f"\n... и ещё {len(dialogs) - 10}")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❗ Ошибка: {e}")
+
+    elif action == "get_dialog_with_user":
+        username = params.get("username", "")
+        acc_id = params.get("account_id", "sites")
+        if not username:
+            await update.message.reply_text("❗ Укажи юзернейм пользователя.")
+            return
+        acc = account_mgr.get(acc_id)
+        if not acc:
+            await update.message.reply_text(f"❗ Аккаунт '{acc_id}' не найден.")
+            return
+        try:
+            async with acc.create_api() as api:
+                messages = await api.get_dialog_with_user(username)
+            agent_ctx.current_dialog_user = username
+            recent = messages[-10:] if len(messages) > 10 else messages
+            lines = [f"💬 *Переписка с {username}* ({acc.name})\n"]
+            for m in recent:
+                sender = getattr(m, 'from_username', '?')
+                text = (getattr(m, 'message', '') or '')[:200]
+                lines.append(f"👤 *{sender}*: {text}")
+            await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❗ Ошибка: {e}")
+
+    elif action == "get_unread":
+        lines = []
+        for acc in account_mgr.accounts:
+            try:
+                async with acc.create_api() as api:
+                    dialogs = await api.get_all_dialogs()
+                unread = [d for d in dialogs if (getattr(d, 'unread', 0) or 0) > 0]
+                lines.append(f"{acc.name}: {len(unread)} непрочитанных")
+                for d in unread[:5]:
+                    username = getattr(d, 'username', '?')
+                    last = (getattr(d, 'last_message', '') or '')[:50]
+                    lines.append(f"  🔴 {username}: {last}")
+            except Exception as e:
+                lines.append(f"{acc.name}: ❌ {str(e)[:40]}")
+        await update.message.reply_text("📩 *Непрочитанные:*\n\n" + "\n".join(lines), parse_mode="Markdown")
+
+    elif action == "generate_reply":
+        reply_key = None
+        reply_data = None
+        # Find the most recent pending reply
+        for rk, rd in pending_replies.items():
+            reply_key = rk
+            reply_data = rd
+        if reply_data:
+            await update.message.reply_text("⏳ Генерирую ответ...")
+            try:
+                reply_text = await generate_reply(
+                    message=reply_data["last_message"],
+                    context=reply_data.get("context", ""),
+                    account_id=reply_data["account_id"],
+                )
+                reply_data["generated_reply"] = reply_text
+                pending_replies[reply_key] = reply_data
+                text = f"💬 *Ответ для {reply_data['username']}*:\n\n{reply_text}"
+                await update.message.reply_text(text, reply_markup=reply_keyboard(reply_key), parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❗ Ошибка: {e}")
+        else:
+            await update.message.reply_text(response or "Нет активных диалогов для ответа.")
+
+    elif action == "edit_reply":
+        # Find reply with generated text
+        for rk, rd in pending_replies.items():
+            if rd.get("generated_reply"):
+                instruction = params.get("instruction", message)
+                try:
+                    new_text = await edit_reply(rd["generated_reply"], instruction, rd.get("context", ""))
+                    rd["generated_reply"] = new_text
+                    pending_replies[rk] = rd
+                    text = f"💬 *Ответ для {rd['username']}*:\n\n{new_text}"
+                    await update.message.reply_text(text, reply_markup=reply_keyboard(rk), parse_mode="Markdown")
+                except Exception as e:
+                    await update.message.reply_text(f"❗ Ошибка: {e}")
+                break
+        else:
+            await update.message.reply_text("Нет сгенерированного ответа для редактирования.")
+
+    elif action == "set_custom_reply":
+        custom_text = params.get("text", message)
+        # Find active dialog
+        for rk, rd in pending_replies.items():
+            rd["generated_reply"] = custom_text
+            pending_replies[rk] = rd
+            text = f"💬 *Ваш ответ для {rd['username']}*:\n\n{custom_text}"
+            await update.message.reply_text(text, reply_markup=reply_keyboard(rk), parse_mode="Markdown")
+            break
+        else:
+            await update.message.reply_text(response or "Нет активного диалога. Сначала выбери сообщение.")
+
+    elif action == "get_connects":
+        lines = []
+        for acc in account_mgr.accounts:
+            try:
+                async with acc.create_api() as api:
+                    connects = await api.get_connects()
+                    total = getattr(connects, "total", "?")
+                    lines.append(f"{acc.name}: {total} коннектов")
+            except Exception as e:
+                lines.append(f"{acc.name}: ❌ {str(e)[:40]}")
+        await update.message.reply_text("💰 *Коннекты:*\n\n" + "\n".join(lines), parse_mode="Markdown")
+
+    elif action == "get_worker_orders":
+        lines = []
+        for acc in account_mgr.accounts:
+            try:
+                async with acc.create_api() as api:
+                    orders = await api.get_worker_orders()
+                    data = orders.get("data", []) if isinstance(orders, dict) else []
+                    lines.append(f"{acc.name}: {len(data)} заказов")
+            except Exception as e:
+                lines.append(f"{acc.name}: ❌ {str(e)[:40]}")
+        await update.message.reply_text("📋 *Заказы:*\n\n" + "\n".join(lines), parse_mode="Markdown")
+
+    else:
+        if response:
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text("Не понял. Попробуй переформулировать.")
 
 
 # ── Build & run ──────────────────────────────────────────
