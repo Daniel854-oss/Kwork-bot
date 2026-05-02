@@ -9,10 +9,13 @@ from datetime import datetime
 import pytz
 from kwork import Kwork
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application, CallbackQueryHandler, CommandHandler,
+    ContextTypes, MessageHandler, filters,
+)
 
 from accounts import AccountManager
-from ai import generate_offer
+from ai import generate_offer, answer_question
 from config import TG_BOT_TOKEN_ORDERS, TG_CHAT_ID, MIN_BUDGET, KWORK_OFFER_TYPE
 from storage import (
     load_keywords, save_keywords,
@@ -29,10 +32,13 @@ pending_projects: dict[int, dict] = {}
 # Global account manager
 account_mgr: AccountManager | None = None
 
+# Stats
+stats = {"polls": 0, "offers_sent": 0, "errors": 0, "started_at": None}
+
 
 def is_work_hours() -> bool:
     now = datetime.now(MSK)
-    return 8 <= now.hour < 20
+    return 8 <= now.hour < 23
 
 
 def extract_block_words(title: str, desc: str) -> list[str]:
@@ -58,7 +64,7 @@ async def poll_kwork(app: Application):
                 projects = await api.get_projects(categories_ids=["all"])
         except Exception as e:
             log.error("Error polling %s: %s", acc.name, e)
-            await app.bot.send_message(TG_CHAT_ID, f"❗ Ошибка при получении заказов ({acc.name}): {e}")
+            stats["errors"] += 1
             continue
 
         for p in projects:
@@ -101,6 +107,7 @@ async def poll_kwork(app: Application):
 
     seen.update(new_seen)
     save_seen(seen)
+    stats["polls"] += 1
 
 
 async def polling_loop(app: Application):
@@ -109,6 +116,7 @@ async def polling_loop(app: Application):
             try:
                 await poll_kwork(app)
             except Exception:
+                stats["errors"] += 1
                 tb = traceback.format_exc()
                 try:
                     await app.bot.send_message(TG_CHAT_ID, f"❗ Ошибка:\n{tb[:3000]}")
@@ -133,18 +141,19 @@ async def send_project_card(app: Application, project: dict):
     rec_name = rec_acc.name if rec_acc else rec_id
 
     text = (
-        f"💼 {project['name']}\n"
+        f"💼 *{project['name'][:100]}*\n"
         f"💰 Бюджет: {budget_str}\n"
         f"{username_line}"
-        f"🏷️ Рекомендован: {rec_name}\n\n"
+        f"🏷 Рекомендован: {rec_name}\n\n"
         f"{desc_preview}\n\n"
-        f"🔗 https://kwork.ru/projects/{pid}"
+        f"🔗 [Открыть на Kwork](https://kwork.ru/projects/{pid})"
     )
 
     # Build account buttons
     acc_buttons = []
     for acc in account_mgr.accounts:
-        label = f"✍️ {acc.name}"
+        marker = " ⭐" if acc.id == rec_id else ""
+        label = f"✍️ {acc.name}{marker}"
         acc_buttons.append(InlineKeyboardButton(label, callback_data=f"reply:{pid}:{acc.id}"))
 
     keyboard = InlineKeyboardMarkup([
@@ -154,13 +163,17 @@ async def send_project_card(app: Application, project: dict):
             InlineKeyboardButton("🚫 Блокировать", callback_data=f"block:{pid}"),
         ]
     ])
-    await app.bot.send_message(chat_id=TG_CHAT_ID, text=text, reply_markup=keyboard, parse_mode="Markdown")
+    await app.bot.send_message(
+        chat_id=TG_CHAT_ID, text=text,
+        reply_markup=keyboard, parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
 
 
 def offer_keyboard(pid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Отправить на Kwork", callback_data=f"send:{pid}"),
+            InlineKeyboardButton("✅ Отправить", callback_data=f"send:{pid}"),
             InlineKeyboardButton("🔄 Переписать", callback_data=f"regen:{pid}"),
             InlineKeyboardButton("❌ Отмена", callback_data=f"cancel:{pid}"),
         ]
@@ -174,6 +187,8 @@ async def do_generate_and_reply(query, project: dict):
         offer = await generate_offer(project["description"], acc_id)
         project["offer_name"] = offer["name"]
         project["offer_text"] = offer["text"]
+        project["offer_price"] = offer.get("price", 1000)
+        project["offer_days"] = offer.get("days", 3)
         pending_projects[pid] = project
     except Exception as e:
         await query.message.reply_text(f"❗ Ошибка генерации: {e}")
@@ -181,7 +196,15 @@ async def do_generate_and_reply(query, project: dict):
 
     acc = account_mgr.get(acc_id)
     acc_name = acc.name if acc else acc_id
-    text = f"📝 *{offer['name']}*\n🏷️ Аккаунт: {acc_name}\n\n{offer['text']}"
+    price = offer.get("price", "?")
+    days = offer.get("days", "?")
+
+    text = (
+        f"📝 *{offer['name']}*\n"
+        f"🏷 Аккаунт: {acc_name}\n"
+        f"💰 Цена: {price}₽ | ⏱ Срок: {days} дн.\n\n"
+        f"{offer['text']}"
+    )
     await query.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
 
 
@@ -255,19 +278,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text(f"⏳ Отправляю отклик от {acc.name}...")
         try:
+            price = project.get("offer_price", acc.price)
+            days = project.get("offer_days", acc.duration)
             async with acc.create_api() as api:
                 await api.web_login(url_to_redirect="/exchange")
                 await api.web.submit_exchange_offer(
                     project_id=pid,
                     offer_type=KWORK_OFFER_TYPE,
                     description=project["offer_text"],
-                    kwork_price=acc.price,
-                    kwork_duration=acc.duration,
+                    kwork_price=price,
+                    kwork_duration=days,
                     kwork_name=project["offer_name"],
                 )
             pending_projects.pop(pid, None)
-            await query.message.reply_text(f"✅ Отклик отправлен от {acc.name}!")
+            stats["offers_sent"] += 1
+            await query.message.reply_text(
+                f"✅ Отклик отправлен!\n"
+                f"🏷 {acc.name}\n"
+                f"💰 {price}₽ | ⏱ {days} дн."
+            )
         except Exception as e:
+            stats["errors"] += 1
             await query.message.reply_text(f"❗ Ошибка отправки: {e}")
 
     elif data.startswith("cancel:"):
@@ -278,9 +309,84 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Commands ──────────────────────────────────────────────
 
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 *Kwork Orders Bot*\n\n"
+        "Я мониторю новые заказы на Kwork, подбираю лучший аккаунт "
+        "и генерирую отклики через AI.\n\n"
+        "📋 *Что я умею:*\n"
+        "• Проверяю заказы каждые 60 сек\n"
+        "• Автоподбор аккаунта (🔵 Сайты / 🟢 Боты)\n"
+        "• AI-генерация откликов с адекватными ценами\n"
+        "• Превью перед отправкой\n"
+        "• Чёрный список и фильтры\n\n"
+        "Напиши /help для списка команд или задай вопрос текстом.",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 *Команды:*\n\n"
+        "🔍 *Мониторинг:*\n"
+        "/status — статус бота и статистика\n"
+        "/test — самодиагностика (проверка API и аккаунтов)\n\n"
+        "🔑 *Ключевые слова:*\n"
+        "/keywords — текущий список\n"
+        "/add слово1 слово2 — добавить\n"
+        "/remove слово — удалить\n\n"
+        "🚫 *Чёрный список:*\n"
+        "/blacklist — список заблокированных слов\n"
+        "/unblock слово — разблокировать\n\n"
+        "👥 *Аккаунты:*\n"
+        "/accounts — информация об аккаунтах\n\n"
+        "💬 *AI:*\n"
+        "Просто напиши вопрос текстом — AI ответит о функциях бота.",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔄 Запускаю самодиагностику...")
+    results = []
+
+    # Test 1: Accounts
+    results.append(f"👥 Аккаунтов: {len(account_mgr.accounts)}")
+    for acc in account_mgr.accounts:
+        try:
+            async with acc.create_api() as api:
+                me = await api.get_me()
+                username = getattr(me, "username", "?")
+                results.append(f"  ✅ {acc.name} — @{username}")
+        except Exception as e:
+            results.append(f"  ❌ {acc.name} — {str(e)[:50]}")
+
+    # Test 2: Keywords
+    kws = load_keywords()
+    results.append(f"\n🔑 Ключевых слов: {len(kws)}")
+
+    # Test 3: Blacklist
+    bl = load_blacklist()
+    results.append(f"🚫 В чёрном списке: {len(bl)}")
+
+    # Test 4: AI
+    try:
+        from ai import _call_gemini
+        test_response = await _call_gemini("Скажи 'OK' одним словом")
+        results.append(f"\n🤖 AI (Gemini): ✅ ответ: {test_response[:30]}")
+    except Exception as e:
+        results.append(f"\n🤖 AI (Gemini): ❌ {str(e)[:50]}")
+
+    # Test 5: Telegram
+    results.append(f"\n📡 Telegram: ✅ бот работает")
+    results.append(f"💬 Chat ID: {TG_CHAT_ID}")
+
+    await msg.edit_text("🔧 *Самодиагностика:*\n\n" + "\n".join(results), parse_mode="Markdown")
+
+
 async def cmd_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kws = load_keywords()
-    await update.message.reply_text("🔑 Ключевые слова:\n" + ", ".join(kws))
+    await update.message.reply_text("🔑 *Ключевые слова:*\n" + ", ".join(kws), parse_mode="Markdown")
 
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,7 +415,7 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bl = load_blacklist()
     if bl:
-        await update.message.reply_text("🚫 Чёрный список:\n" + ", ".join(bl))
+        await update.message.reply_text("🚫 *Чёрный список:*\n" + ", ".join(bl), parse_mode="Markdown")
     else:
         await update.message.reply_text("Чёрный список пуст.")
 
@@ -329,8 +435,13 @@ async def cmd_unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
     for acc in account_mgr.accounts:
-        lines.append(f"{acc.name} — {len(acc.services)} ключевых слов, цена {acc.price}₽, срок {acc.duration} дн.")
-    await update.message.reply_text("👥 Аккаунты:\n\n" + "\n".join(lines))
+        lines.append(
+            f"{acc.name}\n"
+            f"  📊 Услуг: {len(acc.services)} ключевых слов\n"
+            f"  💰 Базовая цена: {acc.price}₽\n"
+            f"  ⏱ Базовый срок: {acc.duration} дн."
+        )
+    await update.message.reply_text("👥 *Аккаунты:*\n\n" + "\n\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -339,22 +450,49 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kws = load_keywords()
     bl = load_blacklist()
     seen = load_seen()
+    uptime = ""
+    if stats["started_at"]:
+        delta = now - stats["started_at"]
+        hours = int(delta.total_seconds() // 3600)
+        mins = int((delta.total_seconds() % 3600) // 60)
+        uptime = f"⏱ Аптайм: {hours}ч {mins}м\n"
+
     status = "✅ активен" if active else "😴 пауза (вне рабочих часов)"
     await update.message.reply_text(
-        f"🤖 Бот заказов\n"
+        f"🤖 *Бот заказов*\n\n"
         f"📊 Статус: {status}\n"
         f"🕐 Время МСК: {now.strftime('%H:%M')}\n"
+        f"{uptime}"
         f"👥 Аккаунтов: {len(account_mgr.accounts)}\n"
         f"🔑 Ключевых слов: {len(kws)}\n"
         f"🚫 В чёрном списке: {len(bl)}\n"
         f"👁 Просмотрено заказов: {len(seen)}\n"
         f"💰 Мин. бюджет: {MIN_BUDGET} руб\n"
+        f"📤 Откликов отправлено: {stats['offers_sent']}\n"
+        f"🔄 Циклов проверки: {stats['polls']}\n"
+        f"❗ Ошибок: {stats['errors']}",
+        parse_mode="Markdown",
     )
+
+
+# ── Free text → AI answer ────────────────────────────────
+
+async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    question = update.message.text
+    if not question or question.startswith("/"):
+        return
+    await update.message.reply_text("🤔 Думаю...")
+    try:
+        answer = await answer_question(question)
+        await update.message.reply_text(answer)
+    except Exception as e:
+        await update.message.reply_text(f"❗ Ошибка AI: {e}")
 
 
 # ── Build & run ──────────────────────────────────────────
 
 async def post_init(app: Application):
+    stats["started_at"] = datetime.now(MSK)
     asyncio.create_task(polling_loop(app))
 
 
@@ -363,6 +501,9 @@ def build_orders_bot(mgr: AccountManager) -> Application:
     account_mgr = mgr
 
     app = Application.builder().token(TG_BOT_TOKEN_ORDERS).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("test", cmd_test))
     app.add_handler(CommandHandler("keywords", cmd_keywords))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("remove", cmd_remove))
@@ -371,4 +512,5 @@ def build_orders_bot(mgr: AccountManager) -> Application:
     app.add_handler(CommandHandler("accounts", cmd_accounts))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_message))
     return app
