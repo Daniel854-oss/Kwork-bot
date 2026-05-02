@@ -16,7 +16,7 @@ from telegram.ext import (
 
 from accounts import AccountManager
 from agent import AgentContext, run_orders_agent, edit_offer
-from ai import generate_offer
+from ai import generate_offer, explain_project
 from config import TG_BOT_TOKEN_ORDERS, TG_CHAT_ID, MIN_BUDGET, KWORK_OFFER_TYPE
 from storage import (
     load_keywords, save_keywords,
@@ -184,8 +184,9 @@ async def send_project_card(app: Application, project: dict):
     keyboard = InlineKeyboardMarkup([
         acc_buttons,
         [
+            InlineKeyboardButton("💡 Объяснить", callback_data=f"explain:{pid}"),
             InlineKeyboardButton("❌ Пропустить", callback_data=f"skip:{pid}"),
-            InlineKeyboardButton("🚫 Блокировать", callback_data=f"block:{pid}"),
+            InlineKeyboardButton("🚫 Блок", callback_data=f"block:{pid}"),
         ]
     ])
     await app.bot.send_message(
@@ -334,6 +335,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             stats["errors"] += 1
             await query.message.reply_text(f"❗ Ошибка отправки: {e}")
+
+    elif data.startswith("explain:"):
+        pid = int(data.split(":")[1])
+        project = pending_projects.get(pid)
+        if not project:
+            await query.message.reply_text("❗ Проект не найден.")
+            return
+        await query.message.reply_text("💡 Анализирую проект...")
+        try:
+            desc = project.get("description", project.get("name", ""))
+            explanation = await explain_project(desc)
+            # Escape markdown in explanation
+            for ch in ('*', '_', '`', '[', ']'):
+                explanation = explanation.replace(ch, '\\' + ch)
+            await query.message.reply_text(
+                f"💡 Разбор проекта:\n\n{explanation[:3500]}"
+            )
+        except Exception as e:
+            await query.message.reply_text(f"❗ Ошибка: {e}")
 
     elif data.startswith("cancel:"):
         pid = int(data.split(":")[1])
@@ -578,10 +598,19 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             project["offer_price"] = offer["price"]
             project["offer_days"] = offer["days"]
             pending_projects[pid] = project
+        # Auto-learn: user wrote their own offer — this is the best training data!
+        add_training_offer(
+            order_desc=agent_ctx.current_project.get("description", ""),
+            offer_text=custom_text,
+            price=offer["price"],
+            days=offer["days"],
+        )
+        data = load_training_data()
         text = (
             f"📝 *Ваш отклик:*\n"
             f"💰 {offer['price']}₽ | ⏱ {offer['days']} дн.\n\n"
-            f"{offer['text']}"
+            f"{offer['text']}\n\n"
+            f"💾 _Сохранён как образец (всего: {len(data['offers'])})_"
         )
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
 
