@@ -139,21 +139,38 @@ async def send_project_card(app: Application, project: dict):
     pid = project["id"]
     pending_projects[pid] = project
     budget = project.get("price")
-    budget_str = f"{budget} руб" if budget else "не указан"
+    budget_str = f"{budget}₽" if budget else "не указан"
     desc = project.get("description", "")
+
+    # Clean HTML entities from Kwork descriptions
+    desc = (desc
+        .replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+        .replace("&mdash;", "—").replace("&ndash;", "–")
+        .replace("&laquo;", "«").replace("&raquo;", "»")
+        .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&nbsp;", " ").replace("&quot;", '"')
+    )
+    # Escape markdown special chars in description
+    for ch in ('*', '_', '`', '[', ']'):
+        desc = desc.replace(ch, '\\' + ch)
+
     desc_preview = desc[:300] + "..." if len(desc) > 300 else desc
     username = project.get("username")
-    username_line = f"👤 `{username}`\n" if username else ""
     rec_id = project.get("recommended_account", "sites")
     rec_acc = account_mgr.get(rec_id)
     rec_name = rec_acc.name if rec_acc else rec_id
 
+    # Determine category emoji based on recommendation
+    cat_emoji = "🔵" if rec_id == "sites" else "🟢"
+
     text = (
-        f"💼 *{project['name'][:100]}*\n"
-        f"💰 Бюджет: {budget_str}\n"
-        f"{username_line}"
-        f"🏷 Рекомендован: {rec_name}\n\n"
-        f"{desc_preview}\n\n"
+        f"{'━' * 20}\n"
+        f"💼 *{project['name'][:100]}*\n\n"
+        f"💰 Бюджет: *{budget_str}*\n"
+        f"👤 Заказчик: {username or '—'}\n"
+        f"{cat_emoji} Рекомендация: *{rec_name}*\n"
+        f"{'─' * 20}\n\n"
+        f"📄 {desc_preview}\n\n"
         f"🔗 [Открыть на Kwork](https://kwork.ru/projects/{pid})"
     )
 
