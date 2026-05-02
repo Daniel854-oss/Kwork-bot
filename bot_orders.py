@@ -22,6 +22,7 @@ from storage import (
     load_keywords, save_keywords,
     load_blacklist, save_blacklist, is_blacklisted,
     load_seen, save_seen,
+    add_training_offer, load_training_data,
 )
 
 log = logging.getLogger(__name__)
@@ -301,6 +302,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             pending_projects.pop(pid, None)
             stats["offers_sent"] += 1
+            # Auto-learn: save successful offer as training example
+            add_training_offer(
+                order_desc=project.get("description", ""),
+                offer_text=project["offer_text"],
+                price=price,
+                days=days,
+            )
             await query.message.reply_text(
                 f"✅ Отклик отправлен!\n"
                 f"🏷 {acc.name}\n"
@@ -641,6 +649,100 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не понял запрос. Попробуй переформулировать.")
 
 
+# ── Training commands ──────────────────────────────────
+
+async def cmd_train(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pull real sent offers from Kwork dialogs to build training data."""
+    msg = await update.message.reply_text("🏫 Собираю твои реальные ответы из Kwork...")
+    total_offers = 0
+    total_replies = 0
+
+    for acc in account_mgr.accounts:
+        try:
+            async with acc.create_api() as api:
+                me = await api.get_me()
+                my_username = getattr(me, 'username', '')
+                dialogs = await api.get_all_dialogs()
+
+                for d in dialogs[:15]:  # Last 15 dialogs
+                    username = getattr(d, 'username', None)
+                    if not username:
+                        continue
+                    try:
+                        messages = await api.get_dialog_with_user(username)
+                    except Exception:
+                        continue
+
+                    for m in messages:
+                        from_user = getattr(m, 'from_username', '')
+                        text = getattr(m, 'message', '') or ''
+                        if from_user == my_username and len(text) > 20:
+                            # Find what the client wrote before my reply
+                            idx = messages.index(m)
+                            client_msg = ''
+                            for prev in reversed(messages[:idx]):
+                                if getattr(prev, 'from_username', '') != my_username:
+                                    client_msg = getattr(prev, 'message', '') or ''
+                                    break
+
+                            from storage import add_training_reply
+                            add_training_reply(client_msg[:300], text[:500])
+                            total_replies += 1
+                            if total_replies >= 20:
+                                break
+                    if total_replies >= 20:
+                        break
+        except Exception as e:
+            log.error("Тренировка %s: %s", acc.name, e)
+
+    data = load_training_data()
+    await msg.edit_text(
+        f"🏫 *Тренировка завершена!*\n\n"
+        f"💬 Ответов собрано: +{total_replies}\n"
+        f"📝 Образцов откликов: {len(data.get('offers', []))}\n"
+        f"💬 Образцов ответов: {len(data.get('replies', []))}\n\n"
+        f"ℹ️ Отклики сохраняются автоматически при отправке.",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save current offer as a good training example."""
+    if not agent_ctx.current_offer or not agent_ctx.current_project:
+        await update.message.reply_text("❗ Нет активного отклика для сохранения.")
+        return
+    add_training_offer(
+        order_desc=agent_ctx.current_project.get("description", ""),
+        offer_text=agent_ctx.current_offer.get("text", ""),
+        price=agent_ctx.current_offer.get("price", 0),
+        days=agent_ctx.current_offer.get("days", 0),
+    )
+    data = load_training_data()
+    await update.message.reply_text(
+        f"✅ Отклик сохранён как образец!\n"
+        f"📚 Всего образцов: {len(data['offers'])} откликов, {len(data['replies'])} ответов"
+    )
+
+
+async def cmd_training_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show training data status."""
+    data = load_training_data()
+    offers = data.get("offers", [])
+    replies = data.get("replies", [])
+    text = (
+        f"🏫 *Тренировочные данные:*\n\n"
+        f"📝 Образцов откликов: {len(offers)}\n"
+        f"💬 Образцов ответов: {len(replies)}\n"
+    )
+    if offers:
+        last = offers[-1]
+        text += f"\nПоследний отклик: {last['offer'][:100]}..."
+    if replies:
+        last = replies[-1]
+        text += f"\nПоследний ответ: {last['reply'][:100]}..."
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 # ── Build & run ──────────────────────────────────────────
 
 async def post_init(app: Application):
@@ -665,6 +767,9 @@ def build_orders_bot(mgr: AccountManager) -> Application:
     app.add_handler(CommandHandler("unblock", cmd_unblock))
     app.add_handler(CommandHandler("accounts", cmd_accounts))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("train", cmd_train))
+    app.add_handler(CommandHandler("learn", cmd_learn))
+    app.add_handler(CommandHandler("training", cmd_training_status))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_message))
     return app
