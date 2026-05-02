@@ -589,7 +589,7 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "force_poll":
         await update.message.reply_text("🔄 Проверяю заказы...")
         try:
-            await poll_kwork(_app)
+            await poll_kwork(context.application)
             await update.message.reply_text("✅ Проверка завершена!")
         except Exception as e:
             await update.message.reply_text(f"❗ Ошибка: {e}")
