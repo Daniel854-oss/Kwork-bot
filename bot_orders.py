@@ -72,7 +72,14 @@ async def poll_kwork(app: Application):
     for acc in account_mgr.accounts:
         try:
             async with acc.create_api() as api:
-                projects = await api.get_projects(categories_ids=["all"])
+                projects = []
+                for page in range(1, 6):  # up to 5 pages (~60 projects)
+                    page_projects = await api.get_projects(categories_ids=["all"], page=page)
+                    if not page_projects:
+                        break
+                    projects.extend(page_projects)
+                    if len(page_projects) < 12:  # last page
+                        break
         except Exception as e:
             log.error("Error polling %s: %s", acc.name, e)
             stats["errors"] += 1
@@ -805,7 +812,14 @@ async def cmd_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report.append(f"\n<b>{acc.name}</b>")
         try:
             async with acc.create_api() as api:
-                projects = await api.get_projects(categories_ids=["all"])
+                projects = []
+                for page in range(1, 6):
+                    page_projects = await api.get_projects(categories_ids=["all"], page=page)
+                    if not page_projects:
+                        break
+                    projects.extend(page_projects)
+                    if len(page_projects) < 12:
+                        break
             report.append(f"  📦 Получено: {len(projects)}")
         except Exception as e:
             report.append(f"  ❌ Ошибка API: {e}")
