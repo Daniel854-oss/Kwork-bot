@@ -795,15 +795,67 @@ async def cmd_training_status(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ── Build & run ──────────────────────────────────────────
 
 async def cmd_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Force a single poll right now, ignoring work hours and paused state."""
+    """Force a single verbose poll — shows exactly what was found and filtered."""
     msg = await update.message.reply_text("🔄 Проверяю заказы...")
-    before = stats["polls"]
-    try:
-        await poll_kwork(context.application)
-        found = stats["polls"] - before
-        await msg.edit_text("✅ Проверка завершена! Новые заказы отправлены выше (если есть).")
-    except Exception as e:
-        await msg.edit_text(f"❗ Ошибка: {e}")
+    seen = load_seen()
+    keywords = [k.lower() for k in load_keywords()]
+    report = []
+
+    for acc in account_mgr.accounts:
+        report.append(f"\n<b>{acc.name}</b>")
+        try:
+            async with acc.create_api() as api:
+                projects = await api.get_projects(categories_ids=["all"])
+            report.append(f"  📦 Получено: {len(projects)}")
+        except Exception as e:
+            report.append(f"  ❌ Ошибка API: {e}")
+            continue
+
+        new = already_seen = bl_filtered = budget_filtered = kw_filtered = sent = 0
+        for p in projects:
+            pid = getattr(p, "id", None)
+            if pid is None:
+                continue
+            if pid in seen:
+                already_seen += 1
+                continue
+            new += 1
+
+            title = (getattr(p, "title", None) or getattr(p, "name", None) or "").lower()
+            desc = (getattr(p, "description", None) or "").lower()
+            price = getattr(p, "price", None) or getattr(p, "budget", None)
+
+            if is_blacklisted(title, desc):
+                bl_filtered += 1
+                continue
+            if MIN_BUDGET > 0 and price and int(price) < MIN_BUDGET:
+                budget_filtered += 1
+                continue
+            if not any(kw in title or kw in desc for kw in keywords):
+                kw_filtered += 1
+                continue
+
+            username = (
+                getattr(p, "username", None) or getattr(p, "user_login", None) or
+                getattr(p, "login", None) or getattr(p, "user", None)
+            )
+            recommended = account_mgr.match_account(title, desc)
+            await send_project_card(context.application, {
+                "id": pid, "name": title or f"Заказ #{pid}",
+                "price": price, "description": desc or title or f"Заказ #{pid}",
+                "username": str(username) if username else None,
+                "recommended_account": recommended.id,
+            })
+            seen.add(pid)
+            sent += 1
+
+        report.append(f"  🆕 Новых: {new} | 👁 Уже видел: {already_seen}")
+        report.append(f"  🚫 Блок: {bl_filtered} | 💰 Бюджет: {budget_filtered} | 🔑 Ключевые: {kw_filtered}")
+        report.append(f"  ✅ Отправлено карточек: {sent}")
+
+    save_seen(seen)
+    stats["polls"] += 1
+    await msg.edit_text("📊 <b>Результат проверки:</b>" + "\n".join(report), parse_mode="HTML")
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
