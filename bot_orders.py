@@ -130,17 +130,25 @@ async def poll_kwork(app: Application):
 
 async def polling_loop(app: Application):
     global polling_paused
+    log.info("Polling loop started")
+    try:
+        await app.bot.send_message(TG_CHAT_ID, "🟢 Автопоиск запущен — проверяю заказы каждые 60 сек.")
+    except Exception:
+        pass
     while True:
-        if not polling_paused and is_work_hours():
+        if polling_paused:
+            await asyncio.sleep(60)
+            continue
+        try:
+            await poll_kwork(app)
+        except Exception:
+            stats["errors"] += 1
+            tb = traceback.format_exc()
+            log.error("Polling error: %s", tb)
             try:
-                await poll_kwork(app)
+                await app.bot.send_message(TG_CHAT_ID, f"❗ Ошибка поллинга:\n{tb[:3000]}")
             except Exception:
-                stats["errors"] += 1
-                tb = traceback.format_exc()
-                try:
-                    await app.bot.send_message(TG_CHAT_ID, f"❗ Ошибка:\n{tb[:3000]}")
-                except Exception:
-                    pass
+                pass
         await asyncio.sleep(60)
 
 
@@ -525,10 +533,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mins = int((delta.total_seconds() % 3600) // 60)
         uptime = f"⏱ Аптайм: {hours}ч {mins}м\n"
 
-    status = "✅ активен" if active else "😴 пауза (вне рабочих часов)"
+    poll_status = "⏸ на паузе (/resume)" if polling_paused else "✅ активен (каждые 60 сек)"
     await update.message.reply_text(
-        f"🤖 *Бот заказов*\n\n"
-        f"📊 Статус: {status}\n"
+        f"🤖 Бот заказов\n\n"
+        f"🔄 Автопоиск: {poll_status}\n"
         f"🕐 Время МСК: {now.strftime('%H:%M')}\n"
         f"{uptime}"
         f"👥 Аккаунтов: {len(account_mgr.accounts)}\n"
@@ -539,7 +547,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📤 Откликов отправлено: {stats['offers_sent']}\n"
         f"🔄 Циклов проверки: {stats['polls']}\n"
         f"❗ Ошибок: {stats['errors']}",
-        parse_mode="Markdown",
     )
 
 
