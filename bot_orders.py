@@ -27,6 +27,7 @@ from storage import (
 
 log = logging.getLogger(__name__)
 MSK = pytz.timezone("Europe/Moscow")
+BUILD_VERSION = "2026-05-06-v4"
 
 # In-memory storage for pending projects
 pending_projects: dict[int, dict] = {}
@@ -65,8 +66,17 @@ def extract_block_words(title: str, desc: str) -> list[str]:
 # ── Polling ───────────────────────────────────────────────
 
 async def poll_kwork(app: Application):
+    if not account_mgr or not account_mgr.accounts:
+        log.error("No accounts loaded — skipping poll")
+        await app.bot.send_message(TG_CHAT_ID, "❗ Нет аккаунтов! Проверь KWORK_LOGIN/PASSWORD в env.")
+        return
+
     seen = load_seen()
     keywords = [k.lower() for k in load_keywords()]
+    if not keywords:
+        log.warning("No keywords — skipping poll")
+        return
+
     new_seen = set()
 
     for acc in account_mgr.accounts:
@@ -390,23 +400,39 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Commands ──────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    accs = len(account_mgr.accounts) if account_mgr else 0
+    kws = load_keywords()
+    paused = polling_paused
+    jobs = len(context.application.job_queue.jobs()) if context.application.job_queue else 0
+
     await update.message.reply_text(
-        "👋 *Kwork Orders Bot — AI Agent*\n\n"
-        "Я мониторю заказы на Kwork и помогаю с откликами.\n\n"
-        "📋 *Что я умею:*\n"
-        "• Автомониторинг заказов каждые 60 сек\n"
-        "• Автоподбор аккаунта (🔵 Сайты / 🟢 Боты)\n"
-        "• AI-генерация откликов с ценами\n"
-        "• Редактирование откликов текстом\n"
-        "• Объяснение заказов\n\n"
-        "💬 *Просто пиши мне:*\n"
-        "• \"исправь цену на 5000\" — отредактирую отклик\n"
-        "• \"объясни этот заказ\" — разберу ТЗ\n"
-        "• \"проверь заказы\" — принудительный поиск\n"
-        "• Или напиши свой текст отклика\n\n"
-        "/help — все команды",
+        f"👋 *Kwork Orders Bot — AI Agent*\n\n"
+        f"🔧 *Диагностика:*\n"
+        f"📦 Версия: `{BUILD_VERSION}`\n"
+        f"💬 Твой chat\\_id: `{chat_id}`\n"
+        f"🎯 TG\\_CHAT\\_ID: `{TG_CHAT_ID}`\n"
+        f"{'✅' if chat_id == TG_CHAT_ID else '❌'} ID совпадает: {chat_id == TG_CHAT_ID}\n"
+        f"👥 Аккаунтов: {accs}\n"
+        f"🔑 Ключевых слов: {len(kws)}\n"
+        f"⏸ На паузе: {paused}\n"
+        f"⏱ Задач в очереди: {jobs}\n"
+        f"🔄 Циклов: {stats['polls']}\n"
+        f"❗ Ошибок: {stats['errors']}\n\n"
+        f"/help — все команды",
         parse_mode="Markdown",
     )
+
+    # Test proactive message to TG_CHAT_ID
+    try:
+        await context.bot.send_message(
+            TG_CHAT_ID,
+            f"🧪 Тест проактивного сообщения!\n"
+            f"Если ты видишь это — TG_CHAT_ID работает.\n"
+            f"Версия: {BUILD_VERSION}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❗ Ошибка отправки в TG_CHAT_ID ({TG_CHAT_ID}): {e}")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
