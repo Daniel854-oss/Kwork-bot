@@ -128,28 +128,20 @@ async def poll_kwork(app: Application):
     stats["polls"] += 1
 
 
-async def polling_loop(app: Application):
-    global polling_paused
-    log.info("Polling loop started")
+async def poll_job(context: ContextTypes.DEFAULT_TYPE):
+    """JobQueue callback — runs every 60 seconds automatically."""
+    if polling_paused:
+        return
     try:
-        await app.bot.send_message(TG_CHAT_ID, "🟢 Автопоиск запущен — проверяю заказы каждые 60 сек.")
+        await poll_kwork(context.application)
     except Exception:
-        pass
-    while True:
-        if polling_paused:
-            await asyncio.sleep(60)
-            continue
+        stats["errors"] += 1
+        tb = traceback.format_exc()
+        log.error("Polling error: %s", tb)
         try:
-            await poll_kwork(app)
+            await context.bot.send_message(TG_CHAT_ID, f"❗ Ошибка поллинга:\n{tb[:3000]}")
         except Exception:
-            stats["errors"] += 1
-            tb = traceback.format_exc()
-            log.error("Polling error: %s", tb)
-            try:
-                await app.bot.send_message(TG_CHAT_ID, f"❗ Ошибка поллинга:\n{tb[:3000]}")
-            except Exception:
-                pass
-        await asyncio.sleep(60)
+            pass
 
 
 # ── Cards & keyboards ────────────────────────────────────
@@ -906,7 +898,12 @@ async def post_init(app: Application):
     global _app
     _app = app
     stats["started_at"] = datetime.now(MSK)
-    asyncio.create_task(polling_loop(app))
+    app.job_queue.run_repeating(poll_job, interval=60, first=10)
+    log.info("Job queue polling started")
+    try:
+        await app.bot.send_message(TG_CHAT_ID, "🟢 Автопоиск запущен — проверяю заказы каждые 60 сек.")
+    except Exception:
+        pass
 
 
 def build_orders_bot(mgr: AccountManager) -> Application:
