@@ -128,12 +128,28 @@ async def poll_kwork(app: Application):
     stats["polls"] += 1
 
 
+first_poll_done = False
+
+
 async def poll_job(context: ContextTypes.DEFAULT_TYPE):
     """JobQueue callback — runs every 60 seconds automatically."""
+    global first_poll_done
     if polling_paused:
         return
     try:
         await poll_kwork(context.application)
+        # Report first poll results
+        if not first_poll_done:
+            first_poll_done = True
+            kws = load_keywords()
+            seen = load_seen()
+            await context.bot.send_message(
+                TG_CHAT_ID,
+                f"✅ Первая проверка завершена!\n"
+                f"🔑 Ключевых слов: {len(kws)}\n"
+                f"👁 Заказов в памяти: {len(seen)}\n"
+                f"📤 Карточек отправлено за цикл: {stats['polls']}"
+            )
     except Exception:
         stats["errors"] += 1
         tb = traceback.format_exc()
@@ -898,12 +914,22 @@ async def post_init(app: Application):
     global _app
     _app = app
     stats["started_at"] = datetime.now(MSK)
+    now = datetime.now(MSK).strftime("%H:%M:%S")
+    kws = load_keywords()
+    accs = len(account_mgr.accounts) if account_mgr else 0
+    try:
+        await app.bot.send_message(
+            TG_CHAT_ID,
+            f"🟢 Бот запущен!\n"
+            f"🕐 Время: {now} МСК\n"
+            f"👥 Аккаунтов: {accs}\n"
+            f"🔑 Ключевых слов: {len(kws)}\n"
+            f"⏱ Первая проверка через 10 сек..."
+        )
+    except Exception as e:
+        log.error("Failed to send startup message: %s", e)
     app.job_queue.run_repeating(poll_job, interval=60, first=10)
     log.info("Job queue polling started")
-    try:
-        await app.bot.send_message(TG_CHAT_ID, "🟢 Автопоиск запущен — проверяю заказы каждые 60 сек.")
-    except Exception:
-        pass
 
 
 def build_orders_bot(mgr: AccountManager) -> Application:
