@@ -43,6 +43,9 @@ agent_ctx = AgentContext()
 # Global app reference for agent actions
 _app: Application | None = None
 
+# Polling control
+polling_paused = False
+
 
 def is_work_hours() -> bool:
     now = datetime.now(MSK)
@@ -119,8 +122,9 @@ async def poll_kwork(app: Application):
 
 
 async def polling_loop(app: Application):
+    global polling_paused
     while True:
-        if is_work_hours():
+        if not polling_paused and is_work_hours():
             try:
                 await poll_kwork(app)
             except Exception:
@@ -790,6 +794,41 @@ async def cmd_training_status(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ── Build & run ──────────────────────────────────────────
 
+async def cmd_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force a single poll right now, ignoring work hours and paused state."""
+    msg = await update.message.reply_text("🔄 Проверяю заказы...")
+    before = stats["polls"]
+    try:
+        await poll_kwork(context.application)
+        found = stats["polls"] - before
+        await msg.edit_text("✅ Проверка завершена! Новые заказы отправлены выше (если есть).")
+    except Exception as e:
+        await msg.edit_text(f"❗ Ошибка: {e}")
+
+
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pause automatic polling."""
+    global polling_paused
+    polling_paused = True
+    await update.message.reply_text("⏸ Автопоиск заказов приостановлен.\nВозобнови: /resume\nРучная проверка: /poll")
+
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resume automatic polling."""
+    global polling_paused
+    polling_paused = False
+    await update.message.reply_text("▶️ Автопоиск возобновлён! Следующая проверка через ~60 сек.")
+
+
+async def cmd_clearseen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear seen order IDs so all current orders become 'new' again."""
+    save_seen(set())
+    await update.message.reply_text(
+        "🗑 Память просмотренных заказов очищена.\n"
+        "Следующий /poll или автопроверка покажут текущие заказы заново."
+    )
+
+
 async def post_init(app: Application):
     global _app
     _app = app
@@ -812,6 +851,10 @@ def build_orders_bot(mgr: AccountManager) -> Application:
     app.add_handler(CommandHandler("unblock", cmd_unblock))
     app.add_handler(CommandHandler("accounts", cmd_accounts))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("poll", cmd_poll))
+    app.add_handler(CommandHandler("pause", cmd_pause))
+    app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("clearseen", cmd_clearseen))
     app.add_handler(CommandHandler("train", cmd_train))
     app.add_handler(CommandHandler("learn", cmd_learn))
     app.add_handler(CommandHandler("training", cmd_training_status))
