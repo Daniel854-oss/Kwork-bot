@@ -123,19 +123,16 @@ async def poll_messages(app: Application):
     stats["polls"] += 1
 
 
-async def message_polling_loop(app: Application):
-    while True:
+async def poll_messages_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await poll_messages(context.application)
+    except Exception:
+        stats["errors"] += 1
+        tb = traceback.format_exc()
         try:
-            await poll_messages(app)
+            await context.bot.send_message(TG_CHAT_ID, f"❗ Ошибка бота сообщений:\n{tb[:3000]}")
         except Exception:
-            stats["errors"] += 1
-            tb = traceback.format_exc()
-            try:
-                await app.bot.send_message(TG_CHAT_ID, f"❗ Ошибка бота сообщений:\n{tb[:3000]}")
-            except Exception:
-                pass
-        await asyncio.sleep(30)
-
+            pass
 
 # ── Callback handler ─────────────────────────────────────
 
@@ -477,7 +474,12 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app: Application):
     stats["started_at"] = datetime.now(MSK)
-    asyncio.create_task(message_polling_loop(app))
+    app.job_queue.run_repeating(poll_messages_job, interval=30, first=10)
+    log.info("Messages job queue polling started")
+    try:
+        await app.bot.send_message(TG_CHAT_ID, "🟢 Бот сообщений запущен — проверяю диалоги каждые 30 сек.")
+    except Exception:
+        pass
 
 
 def build_messages_bot(mgr: AccountManager) -> Application:
