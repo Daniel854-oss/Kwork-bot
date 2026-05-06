@@ -135,6 +135,11 @@ async def polling_loop(app: Application):
 
 # ── Cards & keyboards ────────────────────────────────────
 
+def _html(text: str) -> str:
+    """Escape special HTML characters for Telegram HTML parse mode."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 async def send_project_card(app: Application, project: dict):
     pid = project["id"]
     pending_projects[pid] = project
@@ -150,31 +155,28 @@ async def send_project_card(app: Application, project: dict):
         .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
         .replace("&nbsp;", " ").replace("&quot;", '"')
     )
-    # Escape markdown special chars in description
-    for ch in ('*', '_', '`', '[', ']'):
-        desc = desc.replace(ch, '\\' + ch)
 
-    desc_preview = desc[:300] + "..." if len(desc) > 300 else desc
+    desc_preview = _html(desc[:300] + "..." if len(desc) > 300 else desc)
+    name_safe = _html(project['name'][:100])
     username = project.get("username")
+    username_safe = _html(str(username)) if username else "—"
     rec_id = project.get("recommended_account", "sites")
     rec_acc = account_mgr.get(rec_id)
-    rec_name = rec_acc.name if rec_acc else rec_id
+    rec_name = _html(rec_acc.name if rec_acc else rec_id)
 
-    # Determine category emoji based on recommendation
     cat_emoji = "🔵" if rec_id == "sites" else "🟢"
 
     text = (
         f"{'━' * 20}\n"
-        f"💼 *{project['name'][:100]}*\n\n"
-        f"💰 Бюджет: *{budget_str}*\n"
-        f"👤 Заказчик: {username or '—'}\n"
-        f"{cat_emoji} Рекомендация: *{rec_name}*\n"
+        f"💼 <b>{name_safe}</b>\n\n"
+        f"💰 Бюджет: <b>{budget_str}</b>\n"
+        f"👤 Заказчик: {username_safe}\n"
+        f"{cat_emoji} Рекомендация: <b>{rec_name}</b>\n"
         f"{'─' * 20}\n\n"
         f"📄 {desc_preview}\n\n"
-        f"🔗 [Открыть на Kwork](https://kwork.ru/projects/{pid})"
+        f"🔗 <a href=\"https://kwork.ru/projects/{pid}\">Открыть на Kwork</a>"
     )
 
-    # Build account buttons
     acc_buttons = []
     for acc in account_mgr.accounts:
         marker = " ⭐" if acc.id == rec_id else ""
@@ -191,7 +193,7 @@ async def send_project_card(app: Application, project: dict):
     ])
     await app.bot.send_message(
         chat_id=TG_CHAT_ID, text=text,
-        reply_markup=keyboard, parse_mode="Markdown",
+        reply_markup=keyboard, parse_mode="HTML",
         disable_web_page_preview=True,
     )
 
@@ -226,12 +228,12 @@ async def do_generate_and_reply(query, project: dict):
     days = offer.get("days", "?")
 
     text = (
-        f"📝 *{offer['name']}*\n"
-        f"🏷 Аккаунт: {acc_name}\n"
+        f"📝 <b>{_html(offer['name'])}</b>\n"
+        f"🏷 Аккаунт: {_html(acc_name)}\n"
         f"💰 Цена: {price}₽ | ⏱ Срок: {days} дн.\n\n"
-        f"{offer['text']}"
+        f"{_html(offer['text'])}"
     )
-    await query.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
+    await query.message.reply_text(text, parse_mode="HTML", reply_markup=offer_keyboard(pid))
 
 
 # ── Callback handler ─────────────────────────────────────
@@ -346,9 +348,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             desc = project.get("description", project.get("name", ""))
             explanation = await explain_project(desc)
-            # Escape markdown in explanation
-            for ch in ('*', '_', '`', '[', ']'):
-                explanation = explanation.replace(ch, '\\' + ch)
             await query.message.reply_text(
                 f"💡 Разбор проекта:\n\n{explanation[:3500]}"
             )
@@ -572,12 +571,12 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     project["offer_days"] = new_offer.get("days", 3)
                     pending_projects[pid] = project
             text = (
-                f"📝 *{new_offer['name']}*\n"
+                f"📝 <b>{_html(new_offer['name'])}</b>\n"
                 f"💰 {new_offer.get('price','?')}₽ | ⏱ {new_offer.get('days','?')} дн.\n\n"
-                f"{new_offer['text']}"
+                f"{_html(new_offer['text'])}"
             )
             pid = agent_ctx.current_project["id"] if agent_ctx.current_project else 0
-            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=offer_keyboard(pid))
         except Exception as e:
             await update.message.reply_text(f"❗ Ошибка редактирования: {e}")
 
@@ -607,12 +606,12 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         data = load_training_data()
         text = (
-            f"📝 *Ваш отклик:*\n"
+            f"📝 <b>Ваш отклик:</b>\n"
             f"💰 {offer['price']}₽ | ⏱ {offer['days']} дн.\n\n"
-            f"{offer['text']}\n\n"
-            f"💾 _Сохранён как образец (всего: {len(data['offers'])})_"
+            f"{_html(offer['text'])}\n\n"
+            f"💾 <i>Сохранён как образец (всего: {len(data['offers'])})</i>"
         )
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=offer_keyboard(pid))
 
     elif action == "generate_offer" and agent_ctx.current_project:
         acc_id = params.get("account_id") or agent_ctx.selected_account or "sites"
@@ -631,12 +630,12 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             acc = account_mgr.get(acc_id)
             acc_name = acc.name if acc else acc_id
             text = (
-                f"📝 *{offer['name']}*\n"
-                f"🏷 {acc_name}\n"
+                f"📝 <b>{_html(offer['name'])}</b>\n"
+                f"🏷 {_html(acc_name)}\n"
                 f"💰 {offer.get('price','?')}₽ | ⏱ {offer.get('days','?')} дн.\n\n"
-                f"{offer['text']}"
+                f"{_html(offer['text'])}"
             )
-            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=offer_keyboard(pid))
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=offer_keyboard(pid))
         except Exception as e:
             await update.message.reply_text(f"❗ Ошибка генерации: {e}")
 
