@@ -256,14 +256,35 @@ BOT_HELP_PROMPT = """Ты — AI-помощник в Telegram-боте для у
 
 # ── Generate functions ────────────────────────────────────
 
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
+
+
 async def _call_gemini(prompt: str) -> str:
     client = google_genai.Client(api_key=GEMINI_API_KEY)
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
-    return response.text.strip()
+    last_error = None
+
+    for model in GEMINI_MODELS:
+        for attempt in range(3):
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model,
+                    contents=prompt,
+                )
+                return response.text.strip()
+            except Exception as e:
+                last_error = e
+                err_str = str(e)
+                # Retry only on 503 / overload / rate limit
+                if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
+                    wait = 2 ** attempt  # 1s, 2s, 4s
+                    log.warning("Gemini %s attempt %d failed (503/429), retrying in %ds...", model, attempt + 1, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise  # Other errors — don't retry
+        log.warning("All retries exhausted for %s, trying next model...", model)
+
+    raise last_error  # All models failed
 
 
 async def generate_offer(description: str, account_id: str = "sites") -> dict:
