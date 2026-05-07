@@ -78,6 +78,9 @@ async def poll_kwork(app: Application):
         return
 
     new_seen = set()
+    total_found = 0
+    total_matched = 0
+    errors = []
 
     for acc in account_mgr.accounts:
         try:
@@ -90,9 +93,11 @@ async def poll_kwork(app: Application):
                     projects.extend(page_projects)
                     if len(page_projects) < 12:  # last page
                         break
+            log.info("Account %s: fetched %d projects", acc.name, len(projects))
         except Exception as e:
             log.error("Error polling %s: %s", acc.name, e)
             stats["errors"] += 1
+            errors.append(f"{acc.name}: {str(e)[:100]}")
             continue
 
         for p in projects:
@@ -100,6 +105,7 @@ async def poll_kwork(app: Application):
             if pid is None:
                 continue
             new_seen.add(pid)
+            total_found += 1
             if pid in seen:
                 continue
 
@@ -114,6 +120,7 @@ async def poll_kwork(app: Application):
             if not any(kw in title or kw in desc for kw in keywords):
                 continue
 
+            total_matched += 1
             username = (
                 getattr(p, "username", None) or
                 getattr(p, "user_login", None) or
@@ -134,8 +141,24 @@ async def poll_kwork(app: Application):
             })
 
     seen.update(new_seen)
+    # Cap seen_ids to prevent infinite growth
+    if len(seen) > 1000:
+        seen = set(sorted(seen)[-1000:])
     save_seen(seen)
     stats["polls"] += 1
+
+    # Report errors to chat
+    if errors:
+        try:
+            await app.bot.send_message(
+                TG_CHAT_ID,
+                "⚠️ Ошибки при поллинге:\n" + "\n".join(errors)
+            )
+        except Exception:
+            pass
+
+    log.info("Poll #%d done: %d found, %d new matched, %d in seen, %d errors",
+             stats["polls"], total_found, total_matched, len(seen), len(errors))
 
 
 first_poll_done = False
@@ -936,6 +959,61 @@ async def cmd_clearseen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comprehensive debug info."""
+    seen = load_seen()
+    kws = load_keywords()
+    now = datetime.now(MSK)
+    started = stats.get("started_at")
+    uptime = str(now - started).split(".")[0] if started else "N/A"
+
+    jq_status = "N/A"
+    if context.application.job_queue is not None:
+        jobs = context.application.job_queue.jobs()
+        jq_status = f"{len(jobs)} задач активно"
+    else:
+        jq_status = "❌ job_queue = None"
+
+    text = (
+        f"🔧 DEBUG INFO\n"
+        f"{'─' * 25}\n"
+        f"📦 Версия: {BUILD_VERSION}\n"
+        f"🕐 Время: {now.strftime('%H:%M:%S')} МСК\n"
+        f"⏱ Аптайм: {uptime}\n"
+        f"{'─' * 25}\n"
+        f"⏸ Пауза: {'ДА ⚠️' if polling_paused else 'нет'}\n"
+        f"🔄 Поллингов: {stats['polls']}\n"
+        f"📤 Откликов отправлено: {stats['offers_sent']}\n"
+        f"❌ Ошибок: {stats['errors']}\n"
+        f"{'─' * 25}\n"
+        f"👁 Seen IDs: {len(seen)}\n"
+        f"🔑 Keywords: {len(kws)}\n"
+        f"📋 Pending: {len(pending_projects)}\n"
+        f"{'─' * 25}\n"
+        f"⚙️ JobQueue: {jq_status}\n"
+        f"👥 Аккаунтов: {len(account_mgr.accounts) if account_mgr else 0}\n"
+    )
+    await update.message.reply_text(text)
+
+
+async def _fallback_poll_loop(app: Application):
+    """Fallback polling loop when job_queue is not available."""
+    await asyncio.sleep(10)  # first delay
+    while True:
+        if not polling_paused:
+            try:
+                await poll_kwork(app)
+            except Exception:
+                stats["errors"] += 1
+                tb = traceback.format_exc()
+                log.error("Polling error: %s", tb)
+                try:
+                    await app.bot.send_message(TG_CHAT_ID, f"❗ Ошибка поллинга:\n{tb[:3000]}")
+                except Exception:
+                    pass
+        await asyncio.sleep(60)
+
+
 async def post_init(app: Application):
     global _app
     _app = app
@@ -943,6 +1021,23 @@ async def post_init(app: Application):
     now = datetime.now(MSK).strftime("%H:%M:%S")
     kws = load_keywords()
     accs = len(account_mgr.accounts) if account_mgr else 0
+
+    # Try to start polling via job_queue, fallback to asyncio
+    poll_method = "unknown"
+    if app.job_queue is not None:
+        try:
+            app.job_queue.run_repeating(poll_job, interval=60, first=10)
+            poll_method = "job_queue ✅"
+            log.info("Job queue polling started")
+        except Exception as e:
+            log.error("Job queue failed: %s, falling back to asyncio", e)
+            asyncio.create_task(_fallback_poll_loop(app))
+            poll_method = f"asyncio (fallback, job_queue error: {e})"
+    else:
+        log.warning("job_queue is None — using asyncio fallback")
+        asyncio.create_task(_fallback_poll_loop(app))
+        poll_method = "asyncio (job_queue=None) ⚠️"
+
     try:
         await app.bot.send_message(
             TG_CHAT_ID,
@@ -950,12 +1045,11 @@ async def post_init(app: Application):
             f"🕐 Время: {now} МСК\n"
             f"👥 Аккаунтов: {accs}\n"
             f"🔑 Ключевых слов: {len(kws)}\n"
+            f"🔄 Поллинг: {poll_method}\n"
             f"⏱ Первая проверка через 10 сек..."
         )
     except Exception as e:
         log.error("Failed to send startup message: %s", e)
-    app.job_queue.run_repeating(poll_job, interval=60, first=10)
-    log.info("Job queue polling started")
 
 
 def build_orders_bot(mgr: AccountManager) -> Application:
@@ -977,6 +1071,7 @@ def build_orders_bot(mgr: AccountManager) -> Application:
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("clearseen", cmd_clearseen))
+    app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CommandHandler("train", cmd_train))
     app.add_handler(CommandHandler("learn", cmd_learn))
     app.add_handler(CommandHandler("training", cmd_training_status))
