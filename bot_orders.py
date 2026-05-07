@@ -1024,36 +1024,10 @@ async def _poll_loop(app: Application):
 
 
 async def post_init(app: Application):
-    global _app, _poll_task
-    try:
-        _app = app
-        stats["started_at"] = datetime.now(MSK)
-        now = datetime.now(MSK).strftime("%H:%M:%S")
-        kws = load_keywords()
-        accs = len(account_mgr.accounts) if account_mgr else 0
-
-        # Store reference to prevent garbage collection!
-        _poll_task = asyncio.create_task(_poll_loop(app))
-        poll_method = "asyncio loop ✅"
-        log.info("Polling loop started (asyncio), task=%s", _poll_task)
-
-        await app.bot.send_message(
-            TG_CHAT_ID,
-            f"🟢 Бот запущен!\n"
-            f"📦 Версия: {BUILD_VERSION}\n"
-            f"🕐 Время: {now} МСК\n"
-            f"👥 Аккаунтов: {accs}\n"
-            f"🔑 Ключевых слов: {len(kws)}\n"
-            f"🔄 Поллинг: {poll_method}\n"
-            f"⏱ Первая проверка через 10 сек..."
-        )
-    except Exception as e:
-        log.error("CRITICAL: post_init failed: %s", e)
-        log.error(traceback.format_exc())
-        try:
-            await app.bot.send_message(TG_CHAT_ID, f"❗ КРИТИЧЕСКАЯ ОШИБКА при запуске:\n{e}")
-        except Exception:
-            pass
+    global _app
+    _app = app
+    stats["started_at"] = datetime.now(MSK)
+    log.info("post_init OK, _app set")
 
 
 def build_orders_bot(mgr: AccountManager) -> Application:
