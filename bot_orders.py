@@ -107,10 +107,11 @@ async def poll_kwork(app: Application):
             pid = getattr(p, "id", None)
             if pid is None:
                 continue
-            new_seen.add(pid)
             total_found += 1
-            if pid in seen:
+            # Check BOTH seen (old) and new_seen (current cycle) to prevent duplicates
+            if pid in seen or pid in new_seen:
                 continue
+            new_seen.add(pid)
 
             title = (getattr(p, "title", None) or getattr(p, "name", None) or "").lower()
             desc = (getattr(p, "description", None) or "").lower()
@@ -130,6 +131,8 @@ async def poll_kwork(app: Application):
                 getattr(p, "login", None) or
                 getattr(p, "user", None)
             )
+            offers_count = getattr(p, "offers", None)
+            allow_higher = getattr(p, "allow_higher_price", False)
 
             # Auto-route to best account
             recommended = account_mgr.match_account(title, desc)
@@ -141,6 +144,8 @@ async def poll_kwork(app: Application):
                 "description": desc or title or f"Заказ #{pid}",
                 "username": str(username) if username else None,
                 "recommended_account": recommended.id,
+                "offers_count": offers_count,
+                "allow_higher_price": allow_higher,
             })
 
     seen.update(new_seen)
@@ -229,12 +234,20 @@ async def send_project_card(app: Application, project: dict):
 
     cat_emoji = "🔵" if rec_id == "sites" else "🟢"
 
+    offers_count = project.get("offers_count")
+    offers_str = f"📊 Откликов: <b>{offers_count}</b>" if offers_count is not None else ""
+    allow_higher = project.get("allow_higher_price", False)
+    price_note = " (можно выше)" if allow_higher else ""
+
     text = (
-        f"{'━' * 20}\n"
         f"💼 <b>{name_safe}</b>\n\n"
-        f"💰 Бюджет: <b>{budget_str}</b>\n"
+        f"💰 Бюджет: <b>{budget_str}{price_note}</b>\n"
         f"👤 Заказчик: {username_safe}\n"
         f"{cat_emoji} Рекомендация: <b>{rec_name}</b>\n"
+    )
+    if offers_str:
+        text += offers_str + "\n"
+    text += (
         f"{'─' * 20}\n\n"
         f"📄 {desc_preview}\n\n"
         f"🔗 <a href=\"https://kwork.ru/projects/{pid}\">Открыть на Kwork</a>"

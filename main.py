@@ -16,13 +16,38 @@ log = logging.getLogger(__name__)
 
 async def order_poll_loop(app):
     """Самостоятельный цикл проверки заказов. Запускается из main — не зависит от post_init."""
+    from accounts import AccountManager
+    from storage import load_keywords, load_blacklist
+
     log.info("=== ORDER POLL LOOP STARTED ===")
+
+    # Gather connects info
+    connects_info = ""
+    try:
+        # Get account manager from bot_orders
+        from bot_orders import account_mgr
+        if account_mgr:
+            for acc in account_mgr.accounts:
+                try:
+                    async with acc.create_api() as api:
+                        c = await api.get_connects()
+                        connects_info += f"  {acc.name}: {c.active_connects}/{c.all_connects} коннектов\n"
+                except Exception as e:
+                    connects_info += f"  {acc.name}: ⚠️ {e}\n"
+    except Exception:
+        pass
+
+    kws = load_keywords()
+    bl = load_blacklist()
+
     try:
         await app.bot.send_message(
             TG_CHAT_ID,
             f"🟢 Бот запущен!\n"
             f"📦 Версия: {BUILD_VERSION}\n"
+            f"🔑 Keywords: {len(kws)} | 🚫 Blacklist: {len(bl)}\n"
             f"🔄 Поллинг: asyncio loop ✅\n"
+            f"💎 Коннекты:\n{connects_info}"
             f"⏱ Первая проверка через 10 сек..."
         )
     except Exception as e:
