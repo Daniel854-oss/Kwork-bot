@@ -27,7 +27,7 @@ from storage import (
 
 log = logging.getLogger(__name__)
 MSK = pytz.timezone("Europe/Moscow")
-BUILD_VERSION = "2026-05-06-v4"
+BUILD_VERSION = "2026-05-07-v5"
 
 # In-memory storage for pending projects
 pending_projects: dict[int, dict] = {}
@@ -996,9 +996,10 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
-async def _fallback_poll_loop(app: Application):
-    """Fallback polling loop when job_queue is not available."""
+async def _poll_loop(app: Application):
+    """Main polling loop — runs forever as asyncio task."""
     await asyncio.sleep(10)  # first delay
+    log.info("Poll loop: first check starting")
     while True:
         if not polling_paused:
             try:
@@ -1022,26 +1023,16 @@ async def post_init(app: Application):
     kws = load_keywords()
     accs = len(account_mgr.accounts) if account_mgr else 0
 
-    # Try to start polling via job_queue, fallback to asyncio
-    poll_method = "unknown"
-    if app.job_queue is not None:
-        try:
-            app.job_queue.run_repeating(poll_job, interval=60, first=10)
-            poll_method = "job_queue ✅"
-            log.info("Job queue polling started")
-        except Exception as e:
-            log.error("Job queue failed: %s, falling back to asyncio", e)
-            asyncio.create_task(_fallback_poll_loop(app))
-            poll_method = f"asyncio (fallback, job_queue error: {e})"
-    else:
-        log.warning("job_queue is None — using asyncio fallback")
-        asyncio.create_task(_fallback_poll_loop(app))
-        poll_method = "asyncio (job_queue=None) ⚠️"
+    # Always use asyncio loop — JobQueue is unreliable on Railway (jobs silently disappear)
+    asyncio.create_task(_poll_loop(app))
+    poll_method = "asyncio loop ✅"
+    log.info("Polling loop started (asyncio)")
 
     try:
         await app.bot.send_message(
             TG_CHAT_ID,
             f"🟢 Бот запущен!\n"
+            f"📦 Версия: {BUILD_VERSION}\n"
             f"🕐 Время: {now} МСК\n"
             f"👥 Аккаунтов: {accs}\n"
             f"🔑 Ключевых слов: {len(kws)}\n"
