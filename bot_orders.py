@@ -27,7 +27,7 @@ from storage import (
 
 log = logging.getLogger(__name__)
 MSK = pytz.timezone("Europe/Moscow")
-BUILD_VERSION = "2026-05-07-v5"
+BUILD_VERSION = "2026-05-07-v6"
 
 # In-memory storage for pending projects
 pending_projects: dict[int, dict] = {}
@@ -46,6 +46,9 @@ _app: Application | None = None
 
 # Polling control
 polling_paused = False
+
+# MUST keep strong reference to prevent garbage collection!
+_poll_task: asyncio.Task | None = None
 
 
 def is_work_hours() -> bool:
@@ -963,16 +966,20 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comprehensive debug info."""
     seen = load_seen()
     kws = load_keywords()
+    bl = load_blacklist()
     now = datetime.now(MSK)
     started = stats.get("started_at")
-    uptime = str(now - started).split(".")[0] if started else "N/A"
+    uptime = str(now - started).split(".")[0] if started else "N/A (post_init не запустился!)"
 
-    jq_status = "N/A"
-    if context.application.job_queue is not None:
-        jobs = context.application.job_queue.jobs()
-        jq_status = f"{len(jobs)} задач активно"
+    # Check poll task status
+    if _poll_task is not None:
+        if _poll_task.done():
+            exc = _poll_task.exception() if not _poll_task.cancelled() else None
+            task_status = f"❌ ЗАВЕРШЁН (ошибка: {exc})" if exc else "⚠️ ЗАВЕРШЁН"
+        else:
+            task_status = "✅ работает"
     else:
-        jq_status = "❌ job_queue = None"
+        task_status = "❌ НЕ СОЗДАН (post_init не запустился)"
 
     text = (
         f"🔧 DEBUG INFO\n"
@@ -988,9 +995,10 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{'─' * 25}\n"
         f"👁 Seen IDs: {len(seen)}\n"
         f"🔑 Keywords: {len(kws)}\n"
+        f"🚫 Blacklist: {len(bl)}\n"
         f"📋 Pending: {len(pending_projects)}\n"
         f"{'─' * 25}\n"
-        f"⚙️ JobQueue: {jq_status}\n"
+        f"🔄 Poll task: {task_status}\n"
         f"👥 Аккаунтов: {len(account_mgr.accounts) if account_mgr else 0}\n"
     )
     await update.message.reply_text(text)
@@ -1016,19 +1024,19 @@ async def _poll_loop(app: Application):
 
 
 async def post_init(app: Application):
-    global _app
-    _app = app
-    stats["started_at"] = datetime.now(MSK)
-    now = datetime.now(MSK).strftime("%H:%M:%S")
-    kws = load_keywords()
-    accs = len(account_mgr.accounts) if account_mgr else 0
-
-    # Always use asyncio loop — JobQueue is unreliable on Railway (jobs silently disappear)
-    asyncio.create_task(_poll_loop(app))
-    poll_method = "asyncio loop ✅"
-    log.info("Polling loop started (asyncio)")
-
+    global _app, _poll_task
     try:
+        _app = app
+        stats["started_at"] = datetime.now(MSK)
+        now = datetime.now(MSK).strftime("%H:%M:%S")
+        kws = load_keywords()
+        accs = len(account_mgr.accounts) if account_mgr else 0
+
+        # Store reference to prevent garbage collection!
+        _poll_task = asyncio.create_task(_poll_loop(app))
+        poll_method = "asyncio loop ✅"
+        log.info("Polling loop started (asyncio), task=%s", _poll_task)
+
         await app.bot.send_message(
             TG_CHAT_ID,
             f"🟢 Бот запущен!\n"
@@ -1040,7 +1048,12 @@ async def post_init(app: Application):
             f"⏱ Первая проверка через 10 сек..."
         )
     except Exception as e:
-        log.error("Failed to send startup message: %s", e)
+        log.error("CRITICAL: post_init failed: %s", e)
+        log.error(traceback.format_exc())
+        try:
+            await app.bot.send_message(TG_CHAT_ID, f"❗ КРИТИЧЕСКАЯ ОШИБКА при запуске:\n{e}")
+        except Exception:
+            pass
 
 
 def build_orders_bot(mgr: AccountManager) -> Application:
