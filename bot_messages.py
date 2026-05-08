@@ -14,7 +14,7 @@ from telegram.ext import (
 
 from accounts import AccountManager
 from agent import AgentContext, run_messages_agent, edit_reply
-from ai import generate_reply
+from ai import generate_reply, transcribe_voice
 from config import TG_BOT_TOKEN_MESSAGES, TG_CHAT_ID
 from storage import load_seen_msgs, save_seen_msgs
 
@@ -503,6 +503,29 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не понял. Попробуй переформулировать.")
 
 
+async def on_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle voice messages: transcribe via Gemini, then process as text."""
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        return
+
+    await update.message.reply_text("🎙 Расшифровываю голосовое...")
+    try:
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytes = await file.download_as_bytearray()
+        mime_type = voice.mime_type or "audio/ogg"
+        text = await transcribe_voice(bytes(audio_bytes), mime_type)
+        if not text:
+            await update.message.reply_text("❗ Не удалось расшифровать голосовое.")
+            return
+        await update.message.reply_text(f"📝 Расшифровка:\n{text}")
+        update.message.text = text
+        await on_text_message(update, context)
+    except Exception as e:
+        log.error("Voice transcription error: %s", e)
+        await update.message.reply_text(f"❗ Ошибка расшифровки: {e}")
+
+
 # ── Build & run ──────────────────────────────────────────
 
 async def post_init(app: Application):
@@ -522,4 +545,5 @@ def build_messages_bot(mgr: AccountManager) -> Application:
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CallbackQueryHandler(on_msg_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_message))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice_message))
     return app

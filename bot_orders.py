@@ -16,7 +16,7 @@ from telegram.ext import (
 
 from accounts import AccountManager
 from agent import AgentContext, run_orders_agent, edit_offer
-from ai import generate_offer, explain_project
+from ai import generate_offer, explain_project, transcribe_voice
 from config import TG_BOT_TOKEN_ORDERS, TG_CHAT_ID, MIN_BUDGET, KWORK_OFFER_TYPE
 from storage import (
     load_keywords, save_keywords,
@@ -1178,6 +1178,37 @@ async def post_init(app: Application):
     log.info("post_init OK, _app set")
 
 
+async def on_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle voice messages: transcribe via Gemini, then process as text."""
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        return
+
+    await update.message.reply_text("🎙 Расшифровываю голосовое...")
+    try:
+        # Download voice file
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytes = await file.download_as_bytearray()
+
+        # Determine MIME type
+        mime_type = voice.mime_type or "audio/ogg"
+
+        # Transcribe
+        text = await transcribe_voice(bytes(audio_bytes), mime_type)
+        if not text:
+            await update.message.reply_text("❗ Не удалось расшифровать голосовое.")
+            return
+
+        await update.message.reply_text(f"📝 Расшифровка:\n{text}")
+
+        # Now process as regular text message
+        update.message.text = text
+        await on_text_message(update, context)
+    except Exception as e:
+        log.error("Voice transcription error: %s", e)
+        await update.message.reply_text(f"❗ Ошибка расшифровки: {e}")
+
+
 def build_orders_bot(mgr: AccountManager) -> Application:
     global account_mgr
     account_mgr = mgr
@@ -1203,4 +1234,5 @@ def build_orders_bot(mgr: AccountManager) -> Application:
     app.add_handler(CommandHandler("training", cmd_training_status))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_message))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice_message))
     return app
