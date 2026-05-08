@@ -390,17 +390,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text(f"⏳ Отправляю отклик от {acc.name}...")
         try:
-            price = project.get("offer_price", acc.price)
-            days = project.get("offer_days", acc.duration)
+            price = project.get("offer_price") or acc.price or 1000
+            days = project.get("offer_days") or acc.duration or 3
+            # Ensure valid integers
+            price = int(price)
+            days = int(days)
+            if price < 500:
+                price = 500
+            if days < 1:
+                days = 1
+            offer_name = project.get("offer_name") or "Отклик"
+            offer_text = project.get("offer_text", "")
+            if not offer_text:
+                await query.message.reply_text("❗ Нет текста отклика.")
+                return
             async with acc.create_api() as api:
                 await api.web_login(url_to_redirect="/exchange")
                 await api.web.submit_exchange_offer(
                     project_id=pid,
                     offer_type=KWORK_OFFER_TYPE,
-                    description=project["offer_text"],
+                    description=offer_text,
                     kwork_price=price,
                     kwork_duration=days,
-                    kwork_name=project["offer_name"],
+                    kwork_name=offer_name,
                 )
             pending_projects.pop(pid, None)
             stats["offers_sent"] += 1
