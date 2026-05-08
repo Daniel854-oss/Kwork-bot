@@ -27,7 +27,17 @@ from storage import (
 
 log = logging.getLogger(__name__)
 MSK = pytz.timezone("Europe/Moscow")
-BUILD_VERSION = "2026-05-07-v6"
+BUILD_VERSION = "2026-05-08-v7"
+
+
+def load_my_kworks() -> dict:
+    """Load user's existing kworks from my_kworks.json."""
+    try:
+        with open("my_kworks.json", "r", encoding="utf-8") as f:
+            import json
+            return json.load(f)
+    except Exception:
+        return {}
 
 # In-memory storage for pending projects
 pending_projects: dict[int, dict] = {}
@@ -289,16 +299,31 @@ def offer_keyboard(pid: int) -> InlineKeyboardMarkup:
 async def do_generate_and_reply(query, project: dict):
     pid = project["id"]
     acc_id = project.get("selected_account", "sites")
+    offer_type = project.get("offer_type", "custom")
+    selected_kwork = project.get("selected_kwork")
+
     try:
         offer = await generate_offer(
             project["description"], acc_id,
             budget=int(project.get("price", 0) or 0),
             max_price=int(project.get("possible_price_limit", 0) or 0),
         )
-        project["offer_name"] = offer["name"]
+
+        # Set offer_name based on type
+        if offer_type == "kwork" and selected_kwork:
+            project["offer_name"] = selected_kwork["name"]
+            # Use kwork's price/duration as defaults if AI generated higher
+            project["offer_price"] = selected_kwork.get("price", offer.get("price", 1000))
+            project["offer_days"] = selected_kwork.get("duration", offer.get("days", 3))
+        else:
+            # Custom: use project title as kwork name (what Kwork expects)
+            raw_title = project.get("name", "Отклик")
+            # Capitalize first letter, clean up
+            project["offer_name"] = raw_title[:80].strip().capitalize() if raw_title else offer["name"]
+            project["offer_price"] = offer.get("price", 1000)
+            project["offer_days"] = offer.get("days", 3)
+
         project["offer_text"] = offer["text"]
-        project["offer_price"] = offer.get("price", 1000)
-        project["offer_days"] = offer.get("days", 3)
         pending_projects[pid] = project
     except Exception as e:
         await query.message.reply_text(f"❗ Ошибка генерации: {e}")
@@ -306,11 +331,12 @@ async def do_generate_and_reply(query, project: dict):
 
     acc = account_mgr.get(acc_id)
     acc_name = acc.name if acc else acc_id
-    price = offer.get("price", "?")
-    days = offer.get("days", "?")
+    price = project.get("offer_price", "?")
+    days = project.get("offer_days", "?")
+    type_label = "📋 Мой кворк" if offer_type == "kwork" else "📝 Индивидуальное"
 
     text = (
-        f"📝 <b>{_html(offer['name'])}</b>\n"
+        f"{type_label}: <b>{_html(project['offer_name'])}</b>\n"
         f"🏷 Аккаунт: {_html(acc_name)}\n"
         f"💰 Цена: {price}₽ | ⏱ Срок: {days} дн.\n\n"
         f"{_html(offer['text'])}"
@@ -359,9 +385,89 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Set agent context
         agent_ctx.set_project(project, acc_id)
         await query.edit_message_reply_markup(reply_markup=None)
+
+        # Show offer type selection
+        my_kworks = load_my_kworks()
+        acc_kworks = my_kworks.get(acc_id, [])
+        buttons = [
+            [InlineKeyboardButton("📝 Индивидуальное предложение", callback_data=f"otype:custom:{pid}")],
+        ]
+        if acc_kworks:
+            buttons.append(
+                [InlineKeyboardButton("📋 Предложить мой кворк", callback_data=f"otype:pick:{pid}")]
+            )
         acc = account_mgr.get(acc_id)
         acc_name = acc.name if acc else acc_id
-        await query.message.reply_text(f"⏳ Генерирую отклик от {acc_name}...")
+        await query.message.reply_text(
+            f"🏷 Аккаунт: <b>{_html(acc_name)}</b>\n"
+            f"Выбери тип отклика:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    elif data.startswith("otype:custom:"):
+        pid = int(data.split(":")[2])
+        project = pending_projects.get(pid)
+        if not project:
+            await query.edit_message_text("❗ Заказ не найден.")
+            return
+        project["offer_type"] = "custom"
+        pending_projects[pid] = project
+        await query.edit_message_reply_markup(reply_markup=None)
+        acc_id = project.get("selected_account", "sites")
+        acc = account_mgr.get(acc_id)
+        acc_name = acc.name if acc else acc_id
+        await query.message.reply_text(f"⏳ Генерирую индивидуальное предложение от {acc_name}...")
+        await do_generate_and_reply(query, project)
+
+    elif data.startswith("otype:pick:"):
+        pid = int(data.split(":")[2])
+        project = pending_projects.get(pid)
+        if not project:
+            await query.edit_message_text("❗ Заказ не найден.")
+            return
+        acc_id = project.get("selected_account", "sites")
+        my_kworks = load_my_kworks()
+        acc_kworks = my_kworks.get(acc_id, [])
+        if not acc_kworks:
+            await query.message.reply_text("❗ Нет кворков для этого аккаунта. Добавь их в my_kworks.json")
+            return
+        await query.edit_message_reply_markup(reply_markup=None)
+        buttons = []
+        for kw in acc_kworks:
+            label = f"{kw['name'][:35]} ({kw['price']}₽)"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"kwork:{pid}:{kw['id']}")])
+        buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"otype:custom:{pid}")])
+        await query.message.reply_text(
+            "📋 Выбери кворк для отклика:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    elif data.startswith("kwork:"):
+        parts = data.split(":")
+        pid = int(parts[1])
+        kwork_id = int(parts[2])
+        project = pending_projects.get(pid)
+        if not project:
+            await query.edit_message_text("❗ Заказ не найден.")
+            return
+        acc_id = project.get("selected_account", "sites")
+        my_kworks = load_my_kworks()
+        acc_kworks = my_kworks.get(acc_id, [])
+        selected_kwork = next((k for k in acc_kworks if k["id"] == kwork_id), None)
+        if not selected_kwork:
+            await query.message.reply_text("❗ Кворк не найден.")
+            return
+        project["offer_type"] = "kwork"
+        project["selected_kwork"] = selected_kwork
+        pending_projects[pid] = project
+        await query.edit_message_reply_markup(reply_markup=None)
+        acc = account_mgr.get(acc_id)
+        acc_name = acc.name if acc else acc_id
+        await query.message.reply_text(
+            f"⏳ Генерирую отклик от {acc_name}...\n"
+            f"📋 Кворк: {selected_kwork['name']}"
+        )
         await do_generate_and_reply(query, project)
 
     elif data.startswith("regen:"):
@@ -406,9 +512,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             async with acc.create_api() as api:
                 await api.web_login(url_to_redirect="/exchange")
+                otype = project.get("offer_type", KWORK_OFFER_TYPE)
                 await api.web.submit_exchange_offer(
                     project_id=pid,
-                    offer_type=KWORK_OFFER_TYPE,
+                    offer_type=otype,
                     description=offer_text,
                     kwork_price=price,
                     kwork_duration=days,

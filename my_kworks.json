@@ -1,0 +1,36 @@
+{
+  "sites": [
+    {
+      "id": 1,
+      "name": "Создание сайта на WordPress под ключ",
+      "price": 5000,
+      "duration": 7
+    },
+    {
+      "id": 2,
+      "name": "Доработка и правка сайта",
+      "price": 1000,
+      "duration": 2
+    },
+    {
+      "id": 3,
+      "name": "Верстка по макету Figma на HTML/CSS",
+      "price": 3000,
+      "duration": 5
+    }
+  ],
+  "bots": [
+    {
+      "id": 4,
+      "name": "Telegram-бот под ключ",
+      "price": 3000,
+      "duration": 5
+    },
+    {
+      "id": 5,
+      "name": "Парсер данных (любой сайт)",
+      "price": 2000,
+      "duration": 3
+    }
+  ]
+}
