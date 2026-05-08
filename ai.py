@@ -171,6 +171,7 @@ OFFER_PROMPT_TEMPLATE = """Ты — веб-разработчик-фриланс
 
 ## Ценообразование:
 Рекомендованная цена: {price}₽ (сложность: {complexity})
+{price_limit_note}
 Правила:
 - Мелкие правки: 500-2000₽
 - Средние задачи: 2000-5000₽  
@@ -178,6 +179,7 @@ OFFER_PROMPT_TEMPLATE = """Ты — веб-разработчик-фриланс
 - Крупные под ключ: 10000-25000₽
 - Срок: 1-2 дня мелочи, 3-5 средние, 5-14 крупные
 - Если заказчик указал бюджет — ориентируйся, но не демпингуй ниже 500₽
+- ВАЖНО: Цена в отклике НЕ ДОЛЖНА превышать лимит Kwork! Если цена больше лимита, используй лимит.
 
 {examples}
 
@@ -287,17 +289,34 @@ async def _call_gemini(prompt: str) -> str:
     raise last_error  # All models failed
 
 
-async def generate_offer(description: str, account_id: str = "sites") -> dict:
-    """Generate an offer with intelligent pricing and training examples."""
+async def generate_offer(description: str, account_id: str = "sites",
+                         budget: int = 0, max_price: int = 0) -> dict:
+    """Generate an offer with intelligent pricing and training examples.
+    
+    Args:
+        budget: client's stated budget
+        max_price: Kwork's possible_price_limit for this project
+    """
     spec = ACCOUNT_SPECIALIZATIONS.get(account_id, ACCOUNT_SPECIALIZATIONS["sites"])
     est = estimate_price(description, account_id)
     examples = _build_offer_examples()
+
+    # Build price limit note for AI
+    price_limit_note = ""
+    if max_price and max_price > 0:
+        price_limit_note = f"⚠️ ЛИМИТ KWORK: максимальная цена для этого заказа — {max_price}₽. НЕ ПРЕВЫШАЙ!"
+        # Also clamp our estimate
+        est["price"] = min(est["price"], max_price)
+    if budget and budget > 0:
+        price_limit_note += f"\n💰 Бюджет заказчика: {budget}₽"
+
     prompt = OFFER_PROMPT_TEMPLATE.format(
         description=description,
         specialization=spec,
         price=est["price"],
         complexity=est["level"],
         examples=examples,
+        price_limit_note=price_limit_note,
     )
 
     content = await _call_gemini(prompt)
@@ -311,6 +330,11 @@ async def generate_offer(description: str, account_id: str = "sites") -> dict:
         result["price"] = est["price"]
     if "days" not in result:
         result["days"] = 3
+    # HARD CLAMP: never exceed Kwork's price limit
+    if max_price and max_price > 0:
+        result["price"] = min(int(result["price"]), max_price)
+    # Minimum 500₽
+    result["price"] = max(int(result["price"]), 500)
     return result
 
 

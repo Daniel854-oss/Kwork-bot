@@ -133,6 +133,7 @@ async def poll_kwork(app: Application):
             )
             offers_count = getattr(p, "offers", None)
             allow_higher = getattr(p, "allow_higher_price", False)
+            price_limit = getattr(p, "possible_price_limit", None)
 
             # Auto-route to best account
             recommended = account_mgr.match_account(title, desc)
@@ -146,6 +147,7 @@ async def poll_kwork(app: Application):
                 "recommended_account": recommended.id,
                 "offers_count": offers_count,
                 "allow_higher_price": allow_higher,
+                "possible_price_limit": price_limit,
             })
 
     seen.update(new_seen)
@@ -288,7 +290,11 @@ async def do_generate_and_reply(query, project: dict):
     pid = project["id"]
     acc_id = project.get("selected_account", "sites")
     try:
-        offer = await generate_offer(project["description"], acc_id)
+        offer = await generate_offer(
+            project["description"], acc_id,
+            budget=int(project.get("price", 0) or 0),
+            max_price=int(project.get("possible_price_limit", 0) or 0),
+        )
         project["offer_name"] = offer["name"]
         project["offer_text"] = offer["text"]
         project["offer_price"] = offer.get("price", 1000)
@@ -711,7 +717,11 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         project["selected_account"] = acc_id
         await update.message.reply_text("⏳ Генерирую отклик...")
         try:
-            offer = await generate_offer(project["description"], acc_id)
+            offer = await generate_offer(
+                project["description"], acc_id,
+                budget=int(project.get("price", 0) or 0),
+                max_price=int(project.get("possible_price_limit", 0) or 0),
+            )
             agent_ctx.set_offer(offer)
             project["offer_name"] = offer["name"]
             project["offer_text"] = offer["text"]

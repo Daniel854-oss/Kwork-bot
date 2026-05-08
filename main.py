@@ -7,7 +7,8 @@ import traceback
 
 from accounts import AccountManager
 from bot_orders import build_orders_bot, poll_kwork, polling_paused, stats, BUILD_VERSION
-from bot_messages import build_messages_bot
+from bot_messages import build_messages_bot, poll_messages
+from bot_messages import stats as msg_stats
 from config import TG_BOT_TOKEN_ORDERS, TG_BOT_TOKEN_MESSAGES, TG_CHAT_ID
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -72,6 +73,34 @@ async def order_poll_loop(app):
         await asyncio.sleep(60)
 
 
+async def messages_poll_loop(app):
+    """Цикл проверки сообщений. Запускается из main — не зависит от post_init."""
+    log.info("=== MESSAGES POLL LOOP STARTED ===")
+    try:
+        await app.bot.send_message(
+            TG_CHAT_ID,
+            "📩 Бот сообщений запущен!\n"
+            "🔄 Проверяю диалоги каждые 30 сек..."
+        )
+    except Exception as e:
+        log.error("Failed to send messages startup msg: %s", e)
+
+    await asyncio.sleep(10)
+
+    while True:
+        try:
+            await poll_messages(app)
+        except Exception:
+            msg_stats["errors"] += 1
+            tb = traceback.format_exc()
+            log.error("Messages polling error: %s", tb)
+            try:
+                await app.bot.send_message(TG_CHAT_ID, f"❗ Ошибка бота сообщений:\n{tb[:3000]}")
+            except Exception:
+                pass
+        await asyncio.sleep(30)
+
+
 async def run():
     mgr = AccountManager()
 
@@ -98,9 +127,14 @@ async def run():
         await messages_app.updater.start_polling()
         log.info("Messages bot started polling")
 
-    # START POLL LOOP HERE — guaranteed to run, reference kept alive in run() scope
+    # START POLL LOOPS HERE — guaranteed to run, references kept alive in run() scope
     poll_task = asyncio.create_task(order_poll_loop(orders_app))
-    log.info("Poll task created: %s", poll_task)
+    log.info("Orders poll task created: %s", poll_task)
+
+    msg_poll_task = None
+    if messages_app:
+        msg_poll_task = asyncio.create_task(messages_poll_loop(messages_app))
+        log.info("Messages poll task created: %s", msg_poll_task)
 
     # Keep running until interrupted
     stop_event = asyncio.Event()
@@ -123,6 +157,8 @@ async def run():
     finally:
         log.info("Shutting down...")
         poll_task.cancel()
+        if msg_poll_task:
+            msg_poll_task.cancel()
         await orders_app.updater.stop()
         await orders_app.stop()
         await orders_app.shutdown()

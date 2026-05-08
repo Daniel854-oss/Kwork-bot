@@ -474,12 +474,7 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app: Application):
     stats["started_at"] = datetime.now(MSK)
-    app.job_queue.run_repeating(poll_messages_job, interval=30, first=10)
-    log.info("Messages job queue polling started")
-    try:
-        await app.bot.send_message(TG_CHAT_ID, "🟢 Бот сообщений запущен — проверяю диалоги каждые 30 сек.")
-    except Exception:
-        pass
+    log.info("Messages bot post_init OK")
 
 
 def build_messages_bot(mgr: AccountManager) -> Application:
