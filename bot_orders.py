@@ -510,6 +510,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not offer_text:
                 await query.message.reply_text("❗ Нет текста отклика.")
                 return
+            if len(offer_text) < 150:
+                await query.message.reply_text(
+                    f"❗ Текст отклика слишком короткий ({len(offer_text)} символов). "
+                    f"Минимум 150. Переформулируй или добавь деталей."
+                )
+                return
             async with acc.create_api() as api:
                 await api.web_login(url_to_redirect="/exchange")
                 otype = project.get("offer_type", KWORK_OFFER_TYPE)
