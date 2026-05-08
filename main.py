@@ -76,6 +76,16 @@ async def order_poll_loop(app):
 async def messages_poll_loop(app):
     """Цикл проверки сообщений. Запускается из main — не зависит от post_init."""
     log.info("=== MESSAGES POLL LOOP STARTED ===")
+
+    await asyncio.sleep(10)
+
+    # Silent first run: seed seen_data with current unreads (no notifications)
+    try:
+        await poll_messages(app, silent=True)
+        log.info("Messages: silent seed complete")
+    except Exception as e:
+        log.error("Messages silent seed failed: %s", e)
+
     try:
         await app.bot.send_message(
             TG_CHAT_ID,
@@ -84,8 +94,6 @@ async def messages_poll_loop(app):
         )
     except Exception as e:
         log.error("Failed to send messages startup msg: %s", e)
-
-    await asyncio.sleep(10)
 
     while True:
         try:

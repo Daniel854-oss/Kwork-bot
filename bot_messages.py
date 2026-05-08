@@ -46,8 +46,13 @@ agent_ctx = AgentContext()
 
 # ── Polling messages ──────────────────────────────────────
 
-async def poll_messages(app: Application):
-    """Check all accounts for new unread messages."""
+async def poll_messages(app: Application, silent: bool = False):
+    """Check all accounts for new unread messages.
+    
+    Args:
+        silent: If True, populate seen_data without sending notifications.
+                Used on first run to avoid re-notifying old unreads after deploy.
+    """
     seen_data = load_seen_msgs()
 
     for acc in account_mgr.accounts:
@@ -73,6 +78,12 @@ async def poll_messages(app: Application):
             msg_time = getattr(dialog, "time", 0) or 0
 
             if msg_time in acc_seen:
+                continue
+
+            if silent:
+                # First run: just mark as seen, don't notify
+                acc_seen.add(msg_time)
+                log.info("Silent seed: %s/%s (time=%s)", acc.name, username, msg_time)
                 continue
 
             # Get full conversation for context
