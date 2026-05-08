@@ -27,6 +27,10 @@ def _esc(text: str) -> str:
         text = text.replace(ch, '\\' + ch)
     return text
 
+def _html(text: str) -> str:
+    """Escape HTML special characters for Telegram HTML parse mode."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 # In-memory storage for pending message replies
 pending_replies: dict[str, dict] = {}
 
@@ -99,11 +103,12 @@ async def poll_messages(app: Application):
             }
 
             # Send notification
-            msg_preview = last_msg[:500] if last_msg else "(пустое сообщение)"
+            msg_preview = _html(last_msg[:500]) if last_msg else "(пустое сообщение)"
+            username_safe = _html(str(username))
             text = (
-                f"📩 *Новое сообщение*\n"
-                f"🏷 Аккаунт: {acc.name}\n"
-                f"👤 {username}\n\n"
+                f"📩 <b>Новое сообщение</b>\n"
+                f"🏷 Аккаунт: {_html(acc.name)}\n"
+                f"👤 {username_safe}\n\n"
                 f"💬 {msg_preview}\n"
             )
             keyboard = InlineKeyboardMarkup([
@@ -112,7 +117,15 @@ async def poll_messages(app: Application):
                     InlineKeyboardButton("🔗 Kwork", url=f"https://kwork.ru/dialog?user={username}"),
                 ]
             ])
-            await app.bot.send_message(chat_id=TG_CHAT_ID, text=text, reply_markup=keyboard, parse_mode="Markdown")
+            try:
+                await app.bot.send_message(chat_id=TG_CHAT_ID, text=text, reply_markup=keyboard, parse_mode="HTML")
+            except Exception as e:
+                log.error("Failed to send msg notification for %s: %s", username, e)
+                # Fallback: send without formatting
+                try:
+                    await app.bot.send_message(chat_id=TG_CHAT_ID, text=f"📩 Новое сообщение от {username}\n\n{last_msg[:300]}")
+                except Exception:
+                    pass
 
             acc_seen.add(msg_time)
             stats["messages_found"] += 1
@@ -306,6 +319,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual message check — doesn't affect automatic polling."""
+    msg = await update.message.reply_text("🔍 Проверяю сообщения...")
+    try:
+        await poll_messages(context.application)
+        await msg.edit_text(f"✅ Проверка завершена. Циклов: {stats['polls']}")
+    except Exception as e:
+        await msg.edit_text(f"❗ Ошибка: {str(e)[:200]}")
+
 # ── Free text → AI Agent ──────────────────────────────────
 
 async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -486,6 +508,7 @@ def build_messages_bot(mgr: AccountManager) -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("test", cmd_test))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CallbackQueryHandler(on_msg_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_message))
     return app
