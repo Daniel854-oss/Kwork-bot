@@ -27,7 +27,7 @@ from storage import (
 
 log = logging.getLogger(__name__)
 MSK = pytz.timezone("Europe/Moscow")
-BUILD_VERSION = "2026-05-08-v7"
+BUILD_VERSION = "2026-05-16-v8"
 
 
 def load_my_kworks() -> dict:
@@ -60,6 +60,10 @@ polling_paused = False
 # MUST keep strong reference to prevent garbage collection!
 _poll_task: asyncio.Task | None = None
 
+# In-memory seen cache — survives file loss on Railway between deploys.
+# This is the PRIMARY dedup mechanism. File is just a backup.
+_seen_memory: set[int] = set()
+
 
 def is_work_hours() -> bool:
     now = datetime.now(MSK)
@@ -79,18 +83,22 @@ def extract_block_words(title: str, desc: str) -> list[str]:
 # ── Polling ───────────────────────────────────────────────
 
 async def poll_kwork(app: Application):
+    global _seen_memory
+
     if not account_mgr or not account_mgr.accounts:
         log.error("No accounts loaded — skipping poll")
         await app.bot.send_message(TG_CHAT_ID, "❗ Нет аккаунтов! Проверь KWORK_LOGIN/PASSWORD в env.")
         return
 
-    seen = load_seen()
+    # Merge file-based seen with in-memory cache (memory is primary)
+    file_seen = load_seen()
+    _seen_memory.update(file_seen)  # absorb anything from file we don't have yet
+
     keywords = [k.lower() for k in load_keywords()]
     if not keywords:
         log.warning("No keywords — skipping poll")
         return
 
-    new_seen = set()
     total_found = 0
     total_matched = 0
     errors = []
@@ -118,10 +126,11 @@ async def poll_kwork(app: Application):
             if pid is None:
                 continue
             total_found += 1
-            # Check BOTH seen (old) and new_seen (current cycle) to prevent duplicates
-            if pid in seen or pid in new_seen:
+            # PRIMARY dedup: check in-memory cache
+            if pid in _seen_memory:
                 continue
-            new_seen.add(pid)
+            # Mark seen IMMEDIATELY — before any filtering or sending
+            _seen_memory.add(pid)
 
             title = (getattr(p, "title", None) or getattr(p, "name", None) or "").lower()
             desc = (getattr(p, "description", None) or "").lower()
@@ -160,11 +169,11 @@ async def poll_kwork(app: Application):
                 "possible_price_limit": price_limit,
             })
 
-    seen.update(new_seen)
-    # Cap seen_ids to prevent infinite growth
-    if len(seen) > 1000:
-        seen = set(sorted(seen)[-1000:])
-    save_seen(seen)
+    # Cap in-memory cache to prevent infinite growth
+    if len(_seen_memory) > 2000:
+        _seen_memory = set(sorted(_seen_memory)[-1500:])
+    # Persist to file as backup
+    save_seen(_seen_memory)
     stats["polls"] += 1
 
     # Report errors to chat
@@ -177,8 +186,8 @@ async def poll_kwork(app: Application):
         except Exception:
             pass
 
-    log.info("Poll #%d done: %d found, %d new matched, %d in seen, %d errors",
-             stats["polls"], total_found, total_matched, len(seen), len(errors))
+    log.info("Poll #%d done: %d found, %d new matched, %d in memory, %d errors",
+             stats["polls"], total_found, total_matched, len(_seen_memory), len(errors))
 
 
 first_poll_done = False
@@ -1018,8 +1027,10 @@ async def cmd_training_status(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def cmd_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Force a single verbose poll — shows exactly what was found and filtered."""
+    global _seen_memory
     msg = await update.message.reply_text("🔄 Проверяю заказы...")
-    seen = load_seen()
+    # Merge file with memory
+    _seen_memory.update(load_seen())
     keywords = [k.lower() for k in load_keywords()]
     report = []
 
@@ -1045,9 +1056,10 @@ async def cmd_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pid = getattr(p, "id", None)
             if pid is None:
                 continue
-            if pid in seen:
+            if pid in _seen_memory:
                 already_seen += 1
                 continue
+            _seen_memory.add(pid)
             new += 1
 
             title = (getattr(p, "title", None) or getattr(p, "name", None) or "").lower()
@@ -1075,14 +1087,13 @@ async def cmd_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "username": str(username) if username else None,
                 "recommended_account": recommended.id,
             })
-            seen.add(pid)
             sent += 1
 
         report.append(f"  🆕 Новых: {new} | 👁 Уже видел: {already_seen}")
         report.append(f"  🚫 Блок: {bl_filtered} | 💰 Бюджет: {budget_filtered} | 🔑 Ключевые: {kw_filtered}")
         report.append(f"  ✅ Отправлено карточек: {sent}")
 
-    save_seen(seen)
+    save_seen(_seen_memory)
     stats["polls"] += 1
     await msg.edit_text("📊 <b>Результат проверки:</b>" + "\n".join(report), parse_mode="HTML")
 
@@ -1103,9 +1114,11 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_clearseen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear seen order IDs so all current orders become 'new' again."""
+    global _seen_memory
+    _seen_memory.clear()
     save_seen(set())
     await update.message.reply_text(
-        "🗑 Память просмотренных заказов очищена.\n"
+        "🗑 Память просмотренных заказов очищена (RAM + файл).\n"
         "Следующий /poll или автопроверка покажут текущие заказы заново."
     )
 
@@ -1141,7 +1154,8 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📤 Откликов отправлено: {stats['offers_sent']}\n"
         f"❌ Ошибок: {stats['errors']}\n"
         f"{'─' * 25}\n"
-        f"👁 Seen IDs: {len(seen)}\n"
+        f"👁 Seen (файл): {len(seen)}\n"
+        f"👁 Seen (RAM): {len(_seen_memory)}\n"
         f"🔑 Keywords: {len(kws)}\n"
         f"🚫 Blacklist: {len(bl)}\n"
         f"📋 Pending: {len(pending_projects)}\n"
